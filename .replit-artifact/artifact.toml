@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Atlas OS"
+description = "An AI-powered business operating system for MapSpark Ghana, helping the CEO manage revenue, leads, clients, visibility audits, AI employees, and future automations from one command center."
+version = "1.0.0"
+id = "artifacts/atlas-os"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 26177
+
+[services.development]
+run = "pnpm --filter @workspace/atlas-os run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/atlas-os", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/atlas-os/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "26177"
+BASE_PATH = "/"

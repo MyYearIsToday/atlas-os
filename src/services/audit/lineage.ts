@@ -1,0 +1,3 @@
+import type { AuditEvidenceRef, AuditFinding, MapSparkAudit } from "./audit-types";
+export function collectAuditEvidence(audit:MapSparkAudit):AuditEvidenceRef[] { const refs=[...audit.evidenceRefs,...audit.sections.flatMap(s=>s.evidenceRefs),...audit.findings.flatMap(f=>f.evidenceRefs),...audit.recommendations.flatMap(r=>r.evidenceRefs),...audit.quickWins.flatMap(q=>q.evidenceRefs),...(audit.nextAction?.evidenceRefs??[])]; const seen=new Set<string>(); return refs.filter(r=>!seen.has(r.evidenceId)&&seen.add(r.evidenceId)); }
+export function findingHasLineage(finding:AuditFinding):boolean { return finding.evidenceRefs.length>0 || finding.observability==="NOT_OBSERVABLE" || finding.observability==="CONFLICTING"; }

@@ -1,0 +1,1 @@
+import type { FinancialSnapshot } from "./finance-types";export function createSnapshot(input:Omit<FinancialSnapshot,"snapshotId">):FinancialSnapshot{return {snapshotId:crypto.randomUUID(),...input};}

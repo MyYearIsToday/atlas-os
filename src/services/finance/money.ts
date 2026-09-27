@@ -1,0 +1,8 @@
+import type { Currency, Money, MoneyConversion } from "./finance-types";
+export function money(minorUnits:bigint,currency:Currency,scale=2):Money{return {minorUnits,currency,scale};}
+export function add(a:Money,b:Money):Money{assertSame(a,b);return money(a.minorUnits+b.minorUnits,a.currency,a.scale);}
+export function subtract(a:Money,b:Money):Money{assertSame(a,b);return money(a.minorUnits-b.minorUnits,a.currency,a.scale);}
+export function assertSame(a:Money,b:Money):void{if(a.currency!==b.currency||a.scale!==b.scale)throw new Error("Money currency/scale mismatch");}
+export function decimalToMoney(value:string,currency:Currency,scale=2):Money{if(!/^\d+(\.\d+)?$/.test(value))throw new Error("Invalid non-negative decimal");const [whole,fraction=""] = value.split(".");if(fraction.length>scale)throw new Error("Too many decimal places");return money(BigInt(whole)*10n**BigInt(scale)+BigInt((fraction+"0".repeat(scale)).slice(0,scale)),currency,scale);}
+export function convert(original:Money,rate:string,toCurrency:Currency):MoneyConversion{if(!/^\d+(\.\d+)?$/.test(rate))throw new Error("Invalid conversion rate");const [w,f=""] = rate.split(".");const rateScale=f.length;const numerator=original.minorUnits*(BigInt(w)*10n**BigInt(rateScale)+BigInt(f));const denominator=10n**BigInt(rateScale);return {original,rate,converted:money((numerator+denominator/2n)/denominator,toCurrency,original.scale),rateSource:"provided",rateTimestamp:new Date().toISOString()};}
+export function toDecimal(m:Money):string{const sign=m.minorUnits<0n?"-":"";const n=(m.minorUnits<0n?-m.minorUnits:m.minorUnits).toString().padStart(m.scale+1,"0");return `${sign}${n.slice(0,-m.scale)}.${n.slice(-m.scale)}`;}
