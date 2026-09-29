@@ -126,7 +126,7 @@ export function MissionQueuePage() {
             return (
               <section key={status} className="min-w-0">
                 <div className="mb-2 flex items-center justify-between">
-                  <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${status === 'Completed' ? 'bg-[#16a085]' : status === 'Waiting Approval' ? 'bg-[#e28c76]' : 'bg-[#d4af37]'}`} /><h3 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#acbac9]">{status}</h3></div>
+                  <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${status === 'Completed' ? 'bg-[#16a085]' : status === 'Failed' ? 'bg-[#e28c76]' : status === 'Waiting Approval' ? 'bg-[#e28c76]' : 'bg-[#d4af37]'}`} /><h3 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#acbac9]">{status}</h3></div>
                   <span className="rounded bg-[#192a3e] px-1.5 py-0.5 font-mono text-[9px] text-[#71839a]">{statusTasks.length}</span>
                 </div>
                 <div className="space-y-2.5">

@@ -47,6 +47,30 @@ export const defaultRoutes: Record<OrchestrationEventType, Route> = {
     workerRole: null,
     approvalLevel: "Auto",
   },
+  MissionExecutionStarted: {
+    event: "MissionExecutionStarted",
+    serviceInvoked: "orchestrator/autonomous-workforce.ts#executeMission",
+    workerRole: null,
+    approvalLevel: "Auto",
+  },
+  MissionExecutionSucceeded: {
+    event: "MissionExecutionSucceeded",
+    serviceInvoked: "orchestrator/autonomous-workforce.ts#completeMission",
+    workerRole: null,
+    approvalLevel: "Auto",
+  },
+  MissionExecutionFailed: {
+    event: "MissionExecutionFailed",
+    serviceInvoked: "orchestrator/autonomous-workforce.ts#failMission",
+    workerRole: null,
+    approvalLevel: "Auto",
+  },
+  MissionExecutionBlocked: {
+    event: "MissionExecutionBlocked",
+    serviceInvoked: "orchestrator/autonomous-workforce.ts#requeueMission",
+    workerRole: null,
+    approvalLevel: "Auto",
+  },
   MissionCompleted: {
     event: "MissionCompleted",
     serviceInvoked: "services/mission-queue.ts#localMissionQueueRepository.advance",

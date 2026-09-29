@@ -28,6 +28,10 @@ export type OrchestrationEventType =
   | "ScoreCalculated"
   | "AuditGenerated"
   | "MissionCreated"
+  | "MissionExecutionStarted"
+  | "MissionExecutionSucceeded"
+  | "MissionExecutionFailed"
+  | "MissionExecutionBlocked"
   | "MissionCompleted"
   | "PaymentRecorded"
   | "WorkflowBlocked";
@@ -38,6 +42,10 @@ export interface OrchestrationEventMap {
   ScoreCalculated: { businessId: string; opportunityScore: OpportunityScore; auditInput: AuditGeneratorInput };
   AuditGenerated: { businessId: string; auditId: string; recommendations: AuditRecommendation[]; quickWins: AuditQuickWin[] };
   MissionCreated: { businessId: string; taskId: string };
+  MissionExecutionStarted: { taskId: string; attempt: number; workerRole: WorkerRole; assignedAI: string };
+  MissionExecutionSucceeded: { taskId: string; attempt: number; provider: string; model: string; estimatedCostUsd: number };
+  MissionExecutionFailed: { taskId: string; attempt: number; provider: string; reason: string; retryable: boolean };
+  MissionExecutionBlocked: { taskId: string; attempt: number; reason: string; requeued: true };
   MissionCompleted: { businessId: string; taskId: string; transactions: FinancialTransaction[]; period: ReportPeriod };
   PaymentRecorded: { transactionId: string; snapshotInput: Omit<FinancialSnapshot, "snapshotId">; productId?: string };
   WorkflowBlocked: { businessId: string; fromState: ScoutWorkflowState; attemptedState: ScoutWorkflowState; reason: string };

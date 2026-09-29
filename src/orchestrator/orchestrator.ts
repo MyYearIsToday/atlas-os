@@ -61,9 +61,13 @@ export class AtlasOrchestrator {
   async dispatch<T extends OrchestrationEventType>(
     type: T,
     payload: OrchestrationEventMap[T],
-    options: { approval?: Pick<ApprovalContext, "approvedByHuman" | "approvedByCeo">; eventId?: string } = {},
+    options: {
+      approval?: Pick<ApprovalContext, "approvedByHuman" | "approvedByCeo">;
+      eventId?: string;
+      lineageId?: string;
+    } = {},
   ): Promise<void> {
-    const lineageId = nextLineageId();
+    const lineageId = options.lineageId ?? nextLineageId();
     const eventId = options.eventId ?? computeEventId(type, payload);
     const event: OrchestrationEvent<T> = { type, payload, eventId, lineageId, emittedAt: new Date().toISOString() };
     const route = routeFor(type);

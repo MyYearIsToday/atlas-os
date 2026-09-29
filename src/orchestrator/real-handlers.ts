@@ -79,6 +79,22 @@ export function registerRealHandlers(registry: HandlerRegistry, config: Orchestr
     return { output: { acknowledged: true } };
   });
 
+  registry.register("MissionExecutionStarted", async (event) => {
+    return { output: { acknowledged: true, taskId: event.payload.taskId, attempt: event.payload.attempt } };
+  });
+
+  registry.register("MissionExecutionSucceeded", async (event) => {
+    return { output: { acknowledged: true, taskId: event.payload.taskId, attempt: event.payload.attempt } };
+  });
+
+  registry.register("MissionExecutionFailed", async (event) => {
+    return { output: { acknowledged: true, taskId: event.payload.taskId, attempt: event.payload.attempt, retryable: event.payload.retryable } };
+  });
+
+  registry.register("MissionExecutionBlocked", async (event) => {
+    return { output: { acknowledged: true, taskId: event.payload.taskId, attempt: event.payload.attempt, requeued: event.payload.requeued } };
+  });
+
   registry.register("MissionCompleted", async (event) => {
     const report = profitLoss(event.payload.transactions, event.payload.period, {
       includeTradeSpark: config.featureFlags.includeTradeSparkInAutoChain,

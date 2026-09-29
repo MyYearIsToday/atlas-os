@@ -61,6 +61,40 @@ export function validatePayload<T extends OrchestrationEventType>(event: Orchest
       if (!isNonEmptyString(p.taskId)) errors.push("taskId is required");
       return errors.length ? fail(...errors) : ok;
     }
+    case "MissionExecutionStarted": {
+      const errors: string[] = [];
+      if (!isNonEmptyString(p.taskId)) errors.push("taskId is required");
+      if (!Number.isInteger(p.attempt) || p.attempt < 1) errors.push("attempt must be a positive integer");
+      if (!isNonEmptyString(p.workerRole)) errors.push("workerRole is required");
+      if (!isNonEmptyString(p.assignedAI)) errors.push("assignedAI is required");
+      return errors.length ? fail(...errors) : ok;
+    }
+    case "MissionExecutionSucceeded": {
+      const errors: string[] = [];
+      if (!isNonEmptyString(p.taskId)) errors.push("taskId is required");
+      if (!Number.isInteger(p.attempt) || p.attempt < 1) errors.push("attempt must be a positive integer");
+      if (!isNonEmptyString(p.provider)) errors.push("provider is required");
+      if (!isNonEmptyString(p.model)) errors.push("model is required");
+      if (typeof p.estimatedCostUsd !== "number" || p.estimatedCostUsd < 0) errors.push("estimatedCostUsd must be a non-negative number");
+      return errors.length ? fail(...errors) : ok;
+    }
+    case "MissionExecutionFailed": {
+      const errors: string[] = [];
+      if (!isNonEmptyString(p.taskId)) errors.push("taskId is required");
+      if (!Number.isInteger(p.attempt) || p.attempt < 1) errors.push("attempt must be a positive integer");
+      if (!isNonEmptyString(p.provider)) errors.push("provider is required");
+      if (!isNonEmptyString(p.reason)) errors.push("reason is required");
+      if (typeof p.retryable !== "boolean") errors.push("retryable must be a boolean");
+      return errors.length ? fail(...errors) : ok;
+    }
+    case "MissionExecutionBlocked": {
+      const errors: string[] = [];
+      if (!isNonEmptyString(p.taskId)) errors.push("taskId is required");
+      if (!Number.isInteger(p.attempt) || p.attempt < 1) errors.push("attempt must be a positive integer");
+      if (!isNonEmptyString(p.reason)) errors.push("reason is required");
+      if (p.requeued !== true) errors.push("requeued must be true");
+      return errors.length ? fail(...errors) : ok;
+    }
     case "MissionCompleted": {
       const errors: string[] = [];
       if (!isNonEmptyString(p.businessId)) errors.push("businessId is required");

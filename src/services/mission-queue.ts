@@ -6,12 +6,28 @@ import { localCrmRepository } from './crm';
 
 export type TaskPriority = 'Low' | 'Medium' | 'High' | 'Critical';
 
-export type TaskStatus = 'Pending' | 'In Progress' | 'Waiting Approval' | 'Completed';
+export type TaskStatus = 'Pending' | 'In Progress' | 'Waiting Approval' | 'Completed' | 'Failed';
 
 export type ApprovalLevel = 'Auto' | 'Approval Required' | 'CEO Only';
+export type MissionExecutionOutcome = 'SUCCEEDED' | 'FAILED' | 'BLOCKED';
+
+export interface MissionExecutionRecord {
+  executionId: string;
+  lineageId: string;
+  attempt: number;
+  startedAt: string;
+  completedAt: string;
+  outcome: MissionExecutionOutcome;
+  assignedAI: AgentId;
+  workerRole: string;
+  provider?: string;
+  model?: string;
+  estimatedCostUsd: number;
+  reason?: string;
+}
 
 export const taskPriorities: TaskPriority[] = ['Low', 'Medium', 'High', 'Critical'];
-export const taskStatuses: TaskStatus[] = ['Pending', 'In Progress', 'Waiting Approval', 'Completed'];
+export const taskStatuses: TaskStatus[] = ['Pending', 'In Progress', 'Waiting Approval', 'Completed', 'Failed'];
 export const approvalLevels: ApprovalLevel[] = ['Auto', 'Approval Required', 'CEO Only'];
 
 const priorityRank: Record<TaskPriority, number> = { Critical: 4, High: 3, Medium: 2, Low: 1 };
@@ -30,9 +46,14 @@ export interface Task {
   completedAt: string | null;
   estimatedCost: number;
   estimatedTime: string;
+  executionHistory: MissionExecutionRecord[];
+  retryCount: number;
+  lineageId: string | null;
+  lastFailureReason: string | null;
+  lastFailureCode: string | null;
 }
 
-export type TaskInput = Omit<Task, 'taskId' | 'createdAt' | 'completedAt' | 'status'> & {
+export type TaskInput = Omit<Task, 'taskId' | 'createdAt' | 'completedAt' | 'status' | 'executionHistory' | 'retryCount' | 'lineageId' | 'lastFailureReason' | 'lastFailureCode'> & {
   status?: TaskStatus;
 };
 
@@ -45,7 +66,7 @@ const listeners = new Set<() => void>();
  * represent real work performed. See docs/specs/SPEC-002-CRM.md for the
  * fictional client roster these tasks reference by clientId.
  */
-const seedTasks: Task[] = [
+const seedTaskDefinitions: Array<Omit<Task, 'executionHistory' | 'retryCount' | 'lineageId' | 'lastFailureReason' | 'lastFailureCode'>> = [
   {
     taskId: 'task-visibility-audit-amani',
     title: 'MapSpark visibility audit — Amani Stays',
@@ -198,12 +219,31 @@ const seedTasks: Task[] = [
   },
 ];
 
+const seedTasks: Task[] = seedTaskDefinitions.map((task) => ({
+  ...task,
+  executionHistory: [],
+  retryCount: 0,
+  lineageId: null,
+  lastFailureReason: null,
+  lastFailureCode: null,
+}));
+
 function readTasks(): Task[] {
   if (typeof window === 'undefined') return seedTasks;
 
   try {
     const saved = window.localStorage.getItem(STORAGE_KEY);
-    if (saved) return JSON.parse(saved) as Task[];
+    if (saved) {
+      const parsed = JSON.parse(saved) as Task[];
+      return parsed.map((task) => ({
+        ...task,
+        executionHistory: Array.isArray(task.executionHistory) ? task.executionHistory : [],
+        retryCount: typeof task.retryCount === 'number' ? task.retryCount : 0,
+        lineageId: typeof task.lineageId === 'string' ? task.lineageId : null,
+        lastFailureReason: typeof task.lastFailureReason === 'string' ? task.lastFailureReason : null,
+        lastFailureCode: typeof task.lastFailureCode === 'string' ? task.lastFailureCode : null,
+      }));
+    }
     return seedTasks;
   } catch {
     return seedTasks;
@@ -236,6 +276,7 @@ function nextForwardStatus(task: Task): TaskStatus {
     return task.approvalRequired === 'Auto' ? 'Completed' : 'Waiting Approval';
   }
   if (task.status === 'Waiting Approval') return 'Completed';
+  if (task.status === 'Failed') return 'Pending';
   return task.status;
 }
 
@@ -247,6 +288,7 @@ export interface MissionQueueRepository {
   remove: (id: string) => Promise<void>;
   advance: (id: string) => Promise<Task>;
   sendBackForRevision: (id: string) => Promise<Task>;
+  requeue: (id: string) => Promise<Task>;
 }
 
 export const localMissionQueueRepository: MissionQueueRepository = {
@@ -256,7 +298,15 @@ export const localMissionQueueRepository: MissionQueueRepository = {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== STORAGE_KEY || !event.newValue) return;
       try {
-        snapshot = JSON.parse(event.newValue) as Task[];
+        const parsed = JSON.parse(event.newValue) as Task[];
+        snapshot = parsed.map((task) => ({
+          ...task,
+          executionHistory: Array.isArray(task.executionHistory) ? task.executionHistory : [],
+          retryCount: typeof task.retryCount === 'number' ? task.retryCount : 0,
+          lineageId: typeof task.lineageId === 'string' ? task.lineageId : null,
+          lastFailureReason: typeof task.lastFailureReason === 'string' ? task.lastFailureReason : null,
+          lastFailureCode: typeof task.lastFailureCode === 'string' ? task.lastFailureCode : null,
+        }));
         listener();
       } catch {
         // Keep the last valid local snapshot.
@@ -275,6 +325,11 @@ export const localMissionQueueRepository: MissionQueueRepository = {
       status: input.status ?? 'Pending',
       createdAt: new Date().toISOString(),
       completedAt: null,
+      executionHistory: [],
+      retryCount: 0,
+      lineageId: null,
+      lastFailureReason: null,
+      lastFailureCode: null,
     };
     persist([task, ...snapshot]);
     return task;
@@ -308,6 +363,13 @@ export const localMissionQueueRepository: MissionQueueRepository = {
     persist(snapshot.map((task) => (task.taskId === id ? updated : task)));
     return updated;
   },
+  requeue: async (id) => {
+    const current = snapshot.find((task) => task.taskId === id);
+    if (!current) throw new Error('Task not found');
+    const updated: Task = { ...current, status: 'Pending', completedAt: null };
+    persist(snapshot.map((task) => (task.taskId === id ? updated : task)));
+    return updated;
+  },
 };
 
 export function useMissionQueue(repository: MissionQueueRepository = localMissionQueueRepository) {
@@ -324,6 +386,7 @@ export function useMissionQueue(repository: MissionQueueRepository = localMissio
     deleteTask: repository.remove,
     advanceTask: repository.advance,
     sendBackForRevision: repository.sendBackForRevision,
+    requeueTask: repository.requeue,
   };
 }
 
@@ -354,6 +417,8 @@ export function nextActionLabel(task: Task): string {
       return 'Review';
     case 'Completed':
       return 'View result';
+    case 'Failed':
+      return 'Retry';
   }
 }
 
