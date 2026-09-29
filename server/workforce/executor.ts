@@ -7,7 +7,10 @@ import {
 } from "./registry";
 import { detectMedia, type ChatMessage } from "./router";
 
-export type ErrorKind = "rate_limit" | "auth" | "not_found" | "bad_request" | "server" | "network" | "timeout";
+export type ErrorKind = "rate_limit" | "auth" | "forbidden" | "not_found" | "bad_request" | "server" | "network" | "timeout";
+// "auth" (401 invalid key, 402 insufficient credits): account/key-level — skip the whole provider, no point trying other models.
+// "forbidden" (403): per OpenRouter's own docs this means "your chosen model requires moderation and your input was flagged" —
+// i.e. model/request-specific, not an account problem. Cool that one model down and try the next eligible one.
 
 export class ProviderError extends Error {
   constructor(
@@ -206,6 +209,10 @@ export class WorkforceExecutor {
             authFailed.add(c.providerId); // same key would fail for every model on this provider
             break;
           }
+          if (e.kind === "forbidden") {
+            this.setCooldown(c, 30 * 60 * 1000); // this specific model rejected the request/content; other models on the same account are unaffected
+            break; // try the next eligible model, not the same one again
+          }
           if (e.kind === "bad_request") {
             if (MODALITY_ERR.test(e.message)) break; // model-specific limitation: try the next model
             throw new WorkforceError("BAD_REQUEST", 400, "Provider rejected the request as invalid", attempts);
@@ -226,7 +233,8 @@ const ENDPOINTS: Record<ProviderId, { url: string; keyEnv: string }> = {
 
 export function classify(status: number): ErrorKind {
   if (status === 429) return "rate_limit";
-  if (status === 401 || status === 402 || status === 403) return "auth";
+  if (status === 401 || status === 402) return "auth";
+  if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
   if (status === 408) return "timeout";
   if (status >= 500) return "server";

@@ -175,3 +175,48 @@ test("secrets never appear in errors or traces", async () => {
   assert.ok(!dump.includes("SENTINEL"));
   delete process.env.OPENROUTER_API_KEY; delete process.env.NVIDIA_API_KEY;
 });
+
+// --- OpenRouter 403 classification fix (401/402=account-level auth; 403=model-specific "forbidden") ---
+import { classify as _classify } from "./executor";
+
+test("classify(): 401/402 are account-level auth; 403 is model-specific forbidden, not auth", () => {
+  assert.equal(_classify(401), "auth");
+  assert.equal(_classify(402), "auth");
+  assert.equal(_classify(403), "forbidden");
+  assert.equal(_classify(429), "rate_limit");
+  assert.equal(_classify(502), "server");
+  assert.equal(_classify(503), "server");
+});
+
+test("403 (forbidden) on one OpenRouter model: tries the NEXT OpenRouter model, does not skip straight to NVIDIA", async () => {
+  const h = harness([new ProviderError("forbidden", 403, "model requires moderation"), "ok"]);
+  const r = await h.ex.execute({ employee: "scout", messages: msgs });
+  assert.equal(r.providerId, "openrouter"); // stayed on OpenRouter
+  assert.equal(h.calls.length, 2);
+  assert.notEqual(h.calls[0], h.calls[1]); // different model, not a bare retry of the same one
+});
+
+test("401 (real auth failure): skips ALL remaining OpenRouter models immediately, escalates to NVIDIA", async () => {
+  const h = harness([new ProviderError("auth", 401, "invalid api key"), "ok"]);
+  const r = await h.ex.execute({ employee: "scout", messages: msgs });
+  assert.equal(r.providerId, "nvidia");
+  assert.equal(h.calls.filter((c) => c.startsWith("openrouter")).length, 1); // no retries burned on other OR models
+});
+
+test("402 (insufficient credits): also account-level, skips remaining OpenRouter models", async () => {
+  const h = harness([new ProviderError("auth", 402, "insufficient credits")]);
+  const r = await harness([new ProviderError("auth", 402, "insufficient credits"), "ok"]).ex.execute({ employee: "scout", messages: msgs });
+  assert.equal(r.providerId, "nvidia");
+});
+
+test("403 on every eligible OpenRouter model, then NVIDIA succeeds: full graceful degradation, matches the real production trace shape", async () => {
+  // 403 every OpenRouter entry in scout's chain (dynamic alternates + openrouter/free), then NVIDIA succeeds.
+  const scoutChain = buildWorkforce(CATALOG).find((e) => e.employee === "scout")!.chain;
+  const openrouterSlots = scoutChain.filter((c) => c.providerId === "openrouter").length;
+  const h = harness(Array(openrouterSlots).fill(new ProviderError("forbidden", 403, "flagged")).concat(["ok"]));
+  const r = await h.ex.execute({ employee: "scout", messages: msgs });
+  assert.equal(r.providerId, "nvidia");
+  assert.ok(r.attempts.filter((a) => a.providerId === "openrouter").length >= 1);
+  assert.ok(r.attempts.every((a) => a.outcome !== "auth")); // none of these were misclassified as account-level
+  assert.ok(r.attempts.filter((a) => a.providerId === "openrouter").every((a) => a.outcome === "forbidden"));
+});
