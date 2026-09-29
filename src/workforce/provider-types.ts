@@ -20,6 +20,10 @@ export interface AIJobRequest {
   temperature?: number;
   timeoutMs?: number;
   lineageId: string;
+  /** Sprint 5F (optional, additive; ignored by legacy paths): workforce routing hints and chat-format override for multimodal input. */
+  employee?: string;
+  taskType?: string;
+  messages?: unknown[];
 }
 
 export interface TokenUsage {

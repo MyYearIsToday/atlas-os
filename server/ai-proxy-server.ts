@@ -4,6 +4,7 @@ import { NvidiaProvider } from "../src/workforce/nvidia-provider";
 import type { AIProvider } from "../src/workforce/provider-interface";
 import type { AIJobRequest, ProviderId } from "../src/workforce/provider-types";
 import { defaultWorkforceConfig } from "../src/workforce/workforce-config";
+import { WorkforceProvider } from "./workforce/workforce-provider";
 
 /**
  * Sprint 5D/5E — trusted server/edge execution boundary.
@@ -27,10 +28,23 @@ const MAX_BODY_BYTES = 256 * 1024; // 256KB — a prompt this size is already un
 const MAX_TIMEOUT_MS = 120_000; // server-side ceiling regardless of what a client requests
 
 function buildProviders(): Record<ProviderId, AIProvider> {
-  return {
+  const providers: Record<ProviderId, AIProvider> = {
     openrouter: new OpenRouterProvider({ defaultModel: defaultWorkforceConfig.modelDefaults.openrouter }),
     nvidia: new NvidiaProvider({ defaultModel: defaultWorkforceConfig.modelDefaults.nvidia }),
   };
+  // Sprint 5F: AI Workforce as a third provider ("workforce"), layered on the two above without
+  // changing them. Rollback lever: ATLAS_WORKFORCE_ENABLED=false removes it. The free-model catalog
+  // loads in the background so the port opens immediately; until it lands the static registry
+  // (fixed NVIDIA workers + openrouter/free) is used. Refreshes every 6 hours.
+  if (process.env.ATLAS_WORKFORCE_ENABLED !== "false") {
+    const workforce = WorkforceProvider.create(providers);
+    void workforce.registry.refresh().then(() => {
+      console.log(`[atlas-workforce] catalog=${workforce.registry.catalogStatus} freeModels=${workforce.registry.catalogSize}`);
+    });
+    workforce.registry.startAutoRefresh();
+    providers.workforce = workforce;
+  }
+  return providers;
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -137,6 +151,19 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
       if (!isAuthorized(req)) {
         sendJson(res, 401, { failed: true, code: "PROVIDER_UNAVAILABLE", reason: "Unauthorized" });
         logRequest(method, url, 401, Date.now() - started);
+        return;
+      }
+
+      if (method === "GET" && url === "/api/ai/workforce") {
+        // Authenticated, read-only registry view (models/chains only; no keys, no prompts).
+        const wf = providers.workforce;
+        if (!wf || !(wf instanceof WorkforceProvider)) {
+          sendJson(res, 404, { failed: true, code: "INVALID_RESPONSE", reason: "Workforce is not enabled" });
+          logRequest(method, url, 404, Date.now() - started);
+          return;
+        }
+        sendJson(res, 200, wf.describe());
+        logRequest(method, url, 200, Date.now() - started);
         return;
       }
 

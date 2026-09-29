@@ -40,7 +40,7 @@ export function buildOpenRouterRequest(request: AIJobRequest, apiKey: string, de
     },
     body: JSON.stringify({
       model: request.model ?? defaultModel,
-      messages: [{ role: "user", content: request.task }],
+      messages: request.messages ?? [{ role: "user", content: request.task }],
       max_tokens: request.maxTokens ?? 1024,
       temperature: request.temperature ?? 0.3,
     }),
