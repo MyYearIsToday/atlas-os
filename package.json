@@ -9,7 +9,8 @@
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "server:start": "tsx server/ai-proxy-server.ts",
-    "server:typecheck": "tsc -p server/tsconfig.server.json"
+    "server:typecheck": "tsc -p server/tsconfig.server.json",
+    "smoke:phase1": "tsx scripts/smoke-test-phase1.ts"
   },
   "dependencies": {
     "tsx": "^4.21.0"

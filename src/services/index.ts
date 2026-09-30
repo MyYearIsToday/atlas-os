@@ -4,3 +4,8 @@ export * from './use-atlas-store';
 export * from './visibility-score';
 export * from './crm';
 export * from './mission-queue';
+export * from './phase1-repositories';
+export * from './evidence/constructors';
+export * from './evidence/osm-providers';
+export * from './scout/scout-run';
+export * from './scout/coordinator';

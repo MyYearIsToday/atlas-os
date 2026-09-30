@@ -1,7 +1,30 @@
 export interface DiscoveryQuery { latitude: number; longitude: number; radiusMeters: number; categories: string[]; }
-export interface DiscoveryCandidate { externalId: string; name: string; category?: string; latitude?: number; longitude?: number; address?: string; source: string; sourceUrl?: string; }
+export interface ProviderSourceMetadata {
+  sourceId: string;
+  name: string;
+  attribution?: string;
+  licenseTermsNote?: string;
+}
+
+export interface DiscoveryCandidate {
+  externalId: string;
+  name: string;
+  category?: string;
+  latitude?: number;
+  longitude?: number;
+  address?: string;
+  source: string;
+  sourceUrl?: string;
+  sourceMetadata?: ProviderSourceMetadata;
+}
 export interface BusinessDiscoveryProvider { discover(query: DiscoveryQuery): Promise<DiscoveryCandidate[]>; }
-export interface GeocodeResult { latitude: number; longitude: number; displayName?: string; source: string; }
+export interface GeocodeResult {
+  latitude: number;
+  longitude: number;
+  displayName?: string;
+  source: string;
+  sourceMetadata?: ProviderSourceMetadata;
+}
 export interface GeocoderProvider { geocode(address: string): Promise<GeocodeResult | null>; reverse(latitude: number, longitude: number): Promise<GeocodeResult | null>; }
 export interface BusinessEnrichmentProvider { enrich(candidate: DiscoveryCandidate): Promise<Record<string, unknown>>; }
 export interface EvidenceCollector { collect(input: unknown): Promise<unknown[]>; }
