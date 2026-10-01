@@ -81,7 +81,12 @@ export class OverpassDiscoveryProvider implements BusinessDiscoveryProvider {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (e) {
-      throw new Error(`Overpass request failed: ${e instanceof Error ? e.message : "network error"}`);
+      const cause = e instanceof Error && e.cause
+        ? ` cause=${JSON.stringify(e.cause)}`
+        : "";
+      throw new Error(
+        `Overpass request failed: ${e instanceof Error ? e.message : "network error"}${cause}`
+      );
     }
     if (!res.ok) throw new Error(`Overpass returned HTTP ${res.status}`);
 
