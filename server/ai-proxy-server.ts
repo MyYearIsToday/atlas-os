@@ -225,8 +225,9 @@ function startScoutScheduler(): ScoutScheduler | null {
 
   let scheduler: ScoutScheduler | null = null;
   try {
-    if (process.env.SCOUT_DISCOVERY_SOURCE !== "overpass") {
-      throw new Error("SCOUT_DISCOVERY_SOURCE must explicitly be overpass");
+    const discoverySource = process.env.SCOUT_DISCOVERY_SOURCE;
+    if (discoverySource !== "overpass" && discoverySource !== "geoapify") {
+      throw new Error("SCOUT_DISCOVERY_SOURCE must explicitly be overpass or geoapify");
     }
 
     const latitude = requiredScoutNumber("SCOUT_DISCOVERY_LATITUDE", -90, 90);
@@ -236,7 +237,9 @@ function startScoutScheduler(): ScoutScheduler | null {
     const rawCategories = process.env.SCOUT_DISCOVERY_CATEGORIES?.trim();
     if (!rawCategories) throw new Error("SCOUT_DISCOVERY_CATEGORIES is required");
     const categories = rawCategories.split(",").map((category) => category.trim());
-    if (categories.some((category) => !/^[a-z0-9:_-]+$/i.test(category))) {
+    // Geoapify category identifiers are dotted (e.g. catering.restaurant); other sources keep the original rule.
+    const categoryPattern = discoverySource === "geoapify" ? /^[a-z0-9:_.-]+$/i : /^[a-z0-9:_-]+$/i;
+    if (categories.some((category) => !categoryPattern.test(category))) {
       throw new Error("SCOUT_DISCOVERY_CATEGORIES contains an invalid value");
     }
 
@@ -252,7 +255,7 @@ function startScoutScheduler(): ScoutScheduler | null {
     });
     scheduler.start(intervalMs);
     scoutDiscoveryEnabled = true;
-    console.log(`[atlas-scout] discovery enabled source=overpass intervalMs=${intervalMs}`);
+    console.log(`[atlas-scout] discovery enabled source=${discoverySource} intervalMs=${intervalMs}`);
     return scheduler;
   } catch (error) {
     scheduler?.stop();
