@@ -248,7 +248,7 @@ function startScoutScheduler(): ScoutScheduler | null {
       dispatch: (type, payload) => orchestrator.dispatch(type, payload),
     });
     scheduler.onRun((result) => {
-      console.log(`[atlas-scout] run ${result.ok ? "succeeded" : "failed"} candidates=${result.candidatesFound}`);
+      console.log(`[atlas-scout] run ${result.ok ? "succeeded" : "failed"} candidates=${result.candidatesFound}${result.error ? ` error=${JSON.stringify(result.error)}` : ""}`);
     });
     scheduler.start(intervalMs);
     scoutDiscoveryEnabled = true;
