@@ -5,6 +5,12 @@ import type { AIProvider } from "../src/workforce/provider-interface";
 import type { AIJobRequest, ProviderId } from "../src/workforce/provider-types";
 import { defaultWorkforceConfig } from "../src/workforce/workforce-config";
 import { WorkforceProvider } from "./workforce/workforce-provider";
+import { AtlasOrchestrator } from "../src/orchestrator/orchestrator";
+import { InMemoryBusinessRepository } from "../src/services/scout/business-repository";
+import { createScoutDiscoveryProvider } from "../src/services/scout/discovery-provider-factory";
+import { ScoutScheduler } from "../src/services/scout/scheduler";
+
+let scoutDiscoveryEnabled = false;
 
 /**
  * Sprint 5D/5E — trusted server/edge execution boundary.
@@ -143,7 +149,7 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
         // checker doesn't send custom headers, and this endpoint reveals
         // no secrets, only per-provider healthy/unhealthy + reason.
         const summary = await Promise.all(Object.values(providers).map((p) => p.healthCheck()));
-        sendJson(res, 200, { providers: summary });
+        sendJson(res, 200, { providers: summary, scoutDiscovery: { enabled: scoutDiscoveryEnabled } });
         logRequest(method, url, 200, Date.now() - started);
         return;
       }
@@ -196,12 +202,81 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
   });
 }
 
+function requiredScoutNumber(key: string, min: number, max: number, integer = false): number {
+  const raw = process.env[key]?.trim();
+  if (!raw) throw new Error(`${key} is required`);
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) {
+    throw new Error(`${key} is outside its allowed range`);
+  }
+  return value;
+}
+
+/**
+ * Production discovery is opt-in. Missing or invalid settings leave the API
+ * available and discovery stopped; the deterministic test provider remains
+ * available to isolated tests.
+ */
+function startScoutScheduler(): ScoutScheduler | null {
+  if (process.env.SCOUT_DISCOVERY_ENABLED !== "true") {
+    console.log("[atlas-scout] discovery disabled (SCOUT_DISCOVERY_ENABLED is not true)");
+    return null;
+  }
+
+  let scheduler: ScoutScheduler | null = null;
+  try {
+    if (process.env.SCOUT_DISCOVERY_SOURCE !== "overpass") {
+      throw new Error("SCOUT_DISCOVERY_SOURCE must explicitly be overpass");
+    }
+
+    const latitude = requiredScoutNumber("SCOUT_DISCOVERY_LATITUDE", -90, 90);
+    const longitude = requiredScoutNumber("SCOUT_DISCOVERY_LONGITUDE", -180, 180);
+    const radiusMeters = requiredScoutNumber("SCOUT_DISCOVERY_RADIUS_METERS", 1, 50000, true);
+    const intervalMs = requiredScoutNumber("SCOUT_DISCOVERY_INTERVAL_MS", 60000, 2592000000, true);
+    const rawCategories = process.env.SCOUT_DISCOVERY_CATEGORIES?.trim();
+    if (!rawCategories) throw new Error("SCOUT_DISCOVERY_CATEGORIES is required");
+    const categories = rawCategories.split(",").map((category) => category.trim());
+    if (categories.some((category) => !/^[a-z0-9:_-]+$/i.test(category))) {
+      throw new Error("SCOUT_DISCOVERY_CATEGORIES contains an invalid value");
+    }
+
+    const orchestrator = new AtlasOrchestrator();
+    scheduler = new ScoutScheduler({
+      provider: createScoutDiscoveryProvider(),
+      repository: new InMemoryBusinessRepository(),
+      query: { latitude, longitude, radiusMeters, categories },
+      dispatch: (type, payload) => orchestrator.dispatch(type, payload),
+    });
+    scheduler.onRun((result) => {
+      console.log(`[atlas-scout] run ${result.ok ? "succeeded" : "failed"} candidates=${result.candidatesFound}`);
+    });
+    scheduler.start(intervalMs);
+    scoutDiscoveryEnabled = true;
+    console.log(`[atlas-scout] discovery enabled source=overpass intervalMs=${intervalMs}`);
+    return scheduler;
+  } catch (error) {
+    scheduler?.stop();
+    const reason = error instanceof Error ? error.message : "invalid startup configuration";
+    console.warn(`[atlas-scout] discovery not started: ${reason}`);
+    return null;
+  }
+}
+
 // Standalone entrypoint — not executed when imported for tests.
 if (import.meta.url === `file://${process.argv[1]}`) {
   // Render sets PORT; AI_PROXY_PORT is a local-dev fallback name.
   const port = Number(process.env.PORT ?? process.env.AI_PROXY_PORT ?? 8787);
   const host = "0.0.0.0"; // required by Render — binding to localhost only would make the service unreachable
-  createAiProxyServer().listen(port, host, () => {
+  const scoutScheduler = startScoutScheduler();
+  const server = createAiProxyServer();
+  server.on("close", () => scoutScheduler?.stop());
+  const shutdown = () => {
+    scoutScheduler?.stop();
+    server.close(() => process.exit(0));
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+  server.listen(port, host, () => {
     console.log(`Atlas AI proxy listening on ${host}:${port}`);
   });
 }
