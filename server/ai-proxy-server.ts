@@ -244,14 +244,32 @@ function startScoutScheduler(): ScoutScheduler | null {
     }
 
     const orchestrator = new AtlasOrchestrator();
+    const repository = new InMemoryBusinessRepository();
     scheduler = new ScoutScheduler({
       provider: createScoutDiscoveryProvider(),
-      repository: new InMemoryBusinessRepository(),
+      repository,
       query: { latitude, longitude, radiusMeters, categories },
       dispatch: (type, payload) => orchestrator.dispatch(type, payload),
     });
     scheduler.onRun((result) => {
       console.log(`[atlas-scout] run ${result.ok ? "succeeded" : "failed"} candidates=${result.candidatesFound}${result.error ? ` error=${JSON.stringify(result.error)}` : ""}`);
+      // TEMPORARY observability (counts only, no business data): proves normalize -> dedupe -> persist -> dispatch.
+      try {
+        const created = result.outcomes.filter((o) => o.action === "CREATED");
+        const flaggedDuplicates = created.filter((o) => o.duplicateStatus !== "NONE").length;
+        const updated = result.outcomes.filter((o) => o.action === "UPDATED_EXISTING");
+        const mergedByDedupe = updated.filter((o) => o.duplicateStatus !== "NONE").length;
+        const mergedByKey = updated.length - mergedByDedupe;
+        const dispatchOutcomes: Record<string, number> = {};
+        for (const entry of orchestrator.log.all()) {
+          if (entry.event === "BusinessDiscovered") dispatchOutcomes[entry.outcome] = (dispatchOutcomes[entry.outcome] ?? 0) + 1;
+        }
+        console.log(
+          `[atlas-scout][obs] received=${result.candidatesFound} normalized=${created.length + mergedByDedupe} created=${created.length} flaggedPossibleDuplicate=${flaggedDuplicates} mergedByDedupe=${mergedByDedupe} mergedByExternalKey=${mergedByKey} persisted=${repository.list().length} dispatchCalls=${result.outcomes.length} businessDiscoveredLog=${JSON.stringify(dispatchOutcomes)}`,
+        );
+      } catch (obsError) {
+        console.warn(`[atlas-scout][obs] summary failed: ${obsError instanceof Error ? obsError.message : "unknown"}`);
+      }
     });
     scheduler.start(intervalMs);
     scoutDiscoveryEnabled = true;
