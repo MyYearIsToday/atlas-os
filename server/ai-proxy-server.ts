@@ -9,11 +9,18 @@ import { AtlasOrchestrator } from "../src/orchestrator/orchestrator";
 import { InMemoryBusinessRepository } from "../src/services/scout/business-repository";
 import { createScoutDiscoveryProvider } from "../src/services/scout/discovery-provider-factory";
 import { ScoutScheduler } from "../src/services/scout/scheduler";
+import { createPipelineDeps, type PipelineDeps } from "../src/orchestrator/atlas-pipeline";
+import { MissionRunner } from "../src/orchestrator/mission-runner";
+import { AutonomousWorkforce } from "../src/orchestrator/autonomous-workforce";
+import { ProviderRegistry } from "../src/workforce/provider-registry";
+import { OperationalLedger } from "../src/services/finance/ledger";
 import { submitManualBusiness, type ManualBusinessInput } from "../src/services/scout/manual-entry";
 
 let scoutDiscoveryEnabled = false;
 /** The scheduler's own repository + orchestrator, shared with manual entry so both feed one pipeline. */
 let scoutPipeline: { repository: InMemoryBusinessRepository; orchestrator: AtlasOrchestrator } | null = null;
+/** Downstream Atlas pipeline (evidence -> score -> audit -> mission). Opt-in via ATLAS_PIPELINE_ENABLED=true. */
+let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean } | null = null;
 
 /**
  * Sprint 5D/5E — trusted server/edge execution boundary.
@@ -195,6 +202,44 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
         return;
       }
 
+      if (method === "GET" && url === "/api/atlas/pipeline") {
+        if (!atlasPipeline) {
+          sendJson(res, 503, { failed: true, code: "PROVIDER_UNAVAILABLE", reason: "Atlas pipeline is not enabled" });
+          logRequest(method, url, 503, Date.now() - started);
+          return;
+        }
+        const { deps, executionEnabled } = atlasPipeline;
+        const missions = deps.missionQueue.getSnapshot();
+        sendJson(res, 200, {
+          missionExecutionEnabled: executionEnabled,
+          counts: { businesses: deps.store.businesses.size, scores: deps.store.scores.size, scoresWithheld: [...deps.store.scores.values()].filter((v) => v.overallScore === null).length, audits: deps.store.audits.size, missions: missions.length },
+          missions: missions.map((t) => ({ taskId: t.taskId, title: t.title, businessId: t.clientId, status: t.status, approvalRequired: t.approvalRequired })),
+          trace: deps.store.trace.slice(-200),
+        });
+        logRequest(method, url, 200, Date.now() - started);
+        return;
+      }
+
+      if (method === "POST" && url === "/api/atlas/missions/execute") {
+        if (!atlasPipeline) {
+          sendJson(res, 503, { failed: true, code: "PROVIDER_UNAVAILABLE", reason: "Atlas pipeline is not enabled" });
+          logRequest(method, url, 503, Date.now() - started);
+          return;
+        }
+        const body = (await readJsonBody(req)) as { taskId?: unknown; approvedByHuman?: unknown; approvedByCeo?: unknown } | null;
+        if (!body || typeof body.taskId !== "string") {
+          sendJson(res, 400, { failed: true, code: "INVALID_RESPONSE", reason: "taskId is required" });
+          logRequest(method, url, 400, Date.now() - started);
+          return;
+        }
+        const summary = await atlasPipeline.runner.run(body.taskId, { approvedByHuman: body.approvedByHuman === true, approvedByCeo: body.approvedByCeo === true });
+        const status = summary.outcome === "NOT_FOUND" ? 404 : summary.outcome === "DISABLED" ? 409 : 200;
+        console.log(`[atlas-pipeline][execute] outcome=${summary.outcome} executed=${summary.executed}`);
+        sendJson(res, status, summary);
+        logRequest(method, url, status, Date.now() - started);
+        return;
+      }
+
       if (method === "POST" && url === "/api/scout/manual-entry") {
         if (!scoutPipeline) {
           sendJson(res, 503, { failed: true, code: "PROVIDER_UNAVAILABLE", reason: "Scout pipeline is not running" });
@@ -275,7 +320,22 @@ function startScoutScheduler(): ScoutScheduler | null {
       throw new Error("SCOUT_DISCOVERY_CATEGORIES contains an invalid value");
     }
 
-    const orchestrator = new AtlasOrchestrator();
+    const pipelineDeps = process.env.ATLAS_PIPELINE_ENABLED === "true"
+      ? createPipelineDeps({ allowedSources: process.env.ATLAS_PIPELINE_SOURCES?.split(",").map((v) => v.trim()).filter(Boolean) })
+      : undefined;
+    const orchestrator = new AtlasOrchestrator(undefined, true, pipelineDeps);
+    if (pipelineDeps) {
+      // Execution calls paid/rate-limited AI providers, so it is a second, separate opt-in.
+      const executionEnabled = process.env.ATLAS_MISSION_EXECUTION_ENABLED === "true";
+      const ledger = new OperationalLedger();
+      const providerRegistry = new ProviderRegistry();
+      if (executionEnabled) Object.values(buildProviders()).forEach((provider) => providerRegistry.registerProvider(provider));
+      const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: defaultWorkforceConfig, ledger, orchestrator });
+      const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled });
+      pipelineDeps.onMissionCreated = (task) => runner.autoExecute(task);
+      atlasPipeline = { deps: pipelineDeps, runner, ledger, executionEnabled };
+      console.log(`[atlas-pipeline] enabled sources=${pipelineDeps.allowedSources?.join(",") ?? "all"} missionExecution=${executionEnabled}`);
+    }
     const repository = new InMemoryBusinessRepository();
     scheduler = new ScoutScheduler({
       provider: createScoutDiscoveryProvider(),
@@ -311,6 +371,7 @@ function startScoutScheduler(): ScoutScheduler | null {
   } catch (error) {
     scheduler?.stop();
     scoutPipeline = null;
+    atlasPipeline = null;
     const reason = error instanceof Error ? error.message : "invalid startup configuration";
     console.warn(`[atlas-scout] discovery not started: ${reason}`);
     return null;
