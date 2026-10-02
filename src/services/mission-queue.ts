@@ -513,3 +513,58 @@ export function summarizeToday(tasks: Task[]): TodaysMissionSummary {
     estimatedValueInMotion: inFlight.reduce((sum, task) => sum + resolveClientDealValue(task.clientId), 0),
   };
 }
+
+/**
+ * Server-side mission queue. Same MissionQueueRepository contract and status rules as the
+ * browser store, but held in memory with no localStorage and no demo seed tasks, so server
+ * pipelines never start with fabricated work. Missions are lost on restart.
+ */
+export function createInMemoryMissionQueue(initial: Task[] = []): MissionQueueRepository {
+  let snapshot: Task[] = [...initial];
+  const subscribers = new Set<() => void>();
+  const commit = (next: Task[]) => {
+    snapshot = next;
+    subscribers.forEach((notify) => notify());
+  };
+  const find = (id: string) => {
+    const task = snapshot.find((item) => item.taskId === id);
+    if (!task) throw new Error('Task not found');
+    return task;
+  };
+  const replace = (updated: Task) => {
+    commit(snapshot.map((task) => (task.taskId === updated.taskId ? updated : task)));
+    return updated;
+  };
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      subscribers.add(listener);
+      return () => subscribers.delete(listener);
+    },
+    create: async (input) => {
+      const task: Task = {
+        ...input,
+        taskId: createId(),
+        status: input.status ?? 'Pending',
+        createdAt: new Date().toISOString(),
+        completedAt: null,
+        executionHistory: [],
+        retryCount: 0,
+        lineageId: null,
+        lastFailureReason: null,
+        lastFailureCode: null,
+      };
+      commit([task, ...snapshot]);
+      return task;
+    },
+    update: async (id, patch) => replace({ ...find(id), ...patch }),
+    remove: async (id) => commit(snapshot.filter((task) => task.taskId !== id)),
+    advance: async (id) => {
+      const current = find(id);
+      const status = nextForwardStatus(current);
+      return replace({ ...current, status, completedAt: status === 'Completed' ? new Date().toISOString() : current.completedAt });
+    },
+    sendBackForRevision: async (id) => replace({ ...find(id), status: 'In Progress', completedAt: null }),
+    requeue: async (id) => replace({ ...find(id), status: 'Pending', completedAt: null }),
+  };
+}

@@ -1,3 +1,4 @@
+import type { PipelineDeps } from "./atlas-pipeline";
 import { EventBus } from "./event-bus";
 import { ExecutionLog } from "./execution-log";
 import { RetryManager } from "./retry-manager";
@@ -44,12 +45,12 @@ export class AtlasOrchestrator {
   readonly registry = new HandlerRegistry();
   readonly processedEvents: ProcessedEventCache;
 
-  constructor(private config: OrchestrationConfig = defaultOrchestrationConfig, wireRealHandlers = true) {
+  constructor(private config: OrchestrationConfig = defaultOrchestrationConfig, wireRealHandlers = true, pipeline?: PipelineDeps) {
     this.retryManager = new RetryManager(config.retryPolicy);
     this.workforceManager = new WorkforceManager(config);
     this.workflowEngine = new WorkflowEngine(this.bus, nextLineageId);
     this.processedEvents = new ProcessedEventCache(config.idempotencyPolicy.ttlMs);
-    if (wireRealHandlers) registerRealHandlers(this.registry, config);
+    if (wireRealHandlers) registerRealHandlers(this.registry, config, pipeline);
   }
 
   /**
