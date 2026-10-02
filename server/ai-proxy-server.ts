@@ -9,8 +9,11 @@ import { AtlasOrchestrator } from "../src/orchestrator/orchestrator";
 import { InMemoryBusinessRepository } from "../src/services/scout/business-repository";
 import { createScoutDiscoveryProvider } from "../src/services/scout/discovery-provider-factory";
 import { ScoutScheduler } from "../src/services/scout/scheduler";
+import { submitManualBusiness, type ManualBusinessInput } from "../src/services/scout/manual-entry";
 
 let scoutDiscoveryEnabled = false;
+/** The scheduler's own repository + orchestrator, shared with manual entry so both feed one pipeline. */
+let scoutPipeline: { repository: InMemoryBusinessRepository; orchestrator: AtlasOrchestrator } | null = null;
 
 /**
  * Sprint 5D/5E — trusted server/edge execution boundary.
@@ -192,6 +195,35 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
         return;
       }
 
+      if (method === "POST" && url === "/api/scout/manual-entry") {
+        if (!scoutPipeline) {
+          sendJson(res, 503, { failed: true, code: "PROVIDER_UNAVAILABLE", reason: "Scout pipeline is not running" });
+          logRequest(method, url, 503, Date.now() - started);
+          return;
+        }
+        const body = await readJsonBody(req);
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          sendJson(res, 400, { failed: true, code: "INVALID_RESPONSE", reason: "Missing or malformed request body" });
+          logRequest(method, url, 400, Date.now() - started);
+          return;
+        }
+        const { repository, orchestrator } = scoutPipeline;
+        const logged = orchestrator.log.all().length;
+        const result = await submitManualBusiness(body as ManualBusinessInput, { repository, dispatch: (type, payload) => orchestrator.dispatch(type, payload) });
+        if (!result.ok) {
+          sendJson(res, 400, { failed: true, code: "INVALID_RESPONSE", reason: "Validation failed", errors: result.errors });
+          logRequest(method, url, 400, Date.now() - started);
+          return;
+        }
+        // dispatch() records failures instead of throwing, so report the orchestrator's own outcome.
+        const dispatched = orchestrator.log.all().slice(logged).filter((entry) => entry.event === "BusinessDiscovered");
+        const dispatch = dispatched.length === 1 ? dispatched[0].outcome : "UNKNOWN";
+        console.log(`[atlas-scout][manual] action=${result.outcome.action} duplicateStatus=${result.outcome.duplicateStatus} dispatch=${dispatch}`);
+        sendJson(res, 200, { ok: true, businessId: result.outcome.businessId, action: result.outcome.action, duplicateStatus: result.outcome.duplicateStatus, dispatch });
+        logRequest(method, url, 200, Date.now() - started);
+        return;
+      }
+
       sendJson(res, 404, { failed: true, code: "INVALID_RESPONSE", reason: "Not found" });
       logRequest(method, url, 404, Date.now() - started);
     } catch (error) {
@@ -272,11 +304,13 @@ function startScoutScheduler(): ScoutScheduler | null {
       }
     });
     scheduler.start(intervalMs);
+    scoutPipeline = { repository, orchestrator };
     scoutDiscoveryEnabled = true;
     console.log(`[atlas-scout] discovery enabled source=${discoverySource} intervalMs=${intervalMs}`);
     return scheduler;
   } catch (error) {
     scheduler?.stop();
+    scoutPipeline = null;
     const reason = error instanceof Error ? error.message : "invalid startup configuration";
     console.warn(`[atlas-scout] discovery not started: ${reason}`);
     return null;

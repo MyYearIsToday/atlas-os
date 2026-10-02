@@ -21,6 +21,9 @@ export function normalizeCandidate(candidate: DiscoveryCandidate, id: string, no
     address: candidate.address,
     latitude: candidate.latitude,
     longitude: candidate.longitude,
+    phone: candidate.phone,
+    website: candidate.website,
+    notes: candidate.notes,
     socialLinks: [],
     services: [],
     products: [],
@@ -40,6 +43,9 @@ export function mergeIntoExisting(existing: BusinessIntelligence, candidate: Dis
     address: existing.address ?? candidate.address,
     latitude: existing.latitude ?? candidate.latitude,
     longitude: existing.longitude ?? candidate.longitude,
+    phone: existing.phone ?? candidate.phone,
+    website: existing.website ?? candidate.website,
+    notes: existing.notes ?? candidate.notes,
     sourceReferences: existing.sourceReferences.includes(candidate.source)
       ? existing.sourceReferences
       : [...existing.sourceReferences, candidate.source],

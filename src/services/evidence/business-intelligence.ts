@@ -17,6 +17,7 @@ export interface BusinessIntelligence {
   whatsapp?: string;
   email?: string;
   website?: string;
+  notes?: string;
   socialLinks: string[];
   googleProfileUrl?: string;
   hours?: Record<string, string>;

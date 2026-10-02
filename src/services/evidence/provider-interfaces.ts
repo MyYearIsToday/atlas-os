@@ -13,6 +13,9 @@ export interface DiscoveryCandidate {
   latitude?: number;
   longitude?: number;
   address?: string;
+  phone?: string;
+  website?: string;
+  notes?: string;
   source: string;
   sourceUrl?: string;
   sourceMetadata?: ProviderSourceMetadata;

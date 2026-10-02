@@ -15,6 +15,7 @@ import {
 } from '@/pages/atlas-pages';
 import { CrmPage } from '@/pages/crm-page';
 import { MissionQueuePage } from '@/pages/mission-queue-page';
+import { ScoutPage } from '@/pages/scout-page';
 import NotFound from '@/pages/not-found';
 import {
   Route,
@@ -34,6 +35,7 @@ function Router() {
           <Route path="/employees" component={EmployeesPage} />
           <Route path="/crm" component={CrmPage} />
           <Route path="/mission-queue" component={MissionQueuePage} />
+          <Route path="/scout" component={ScoutPage} />
           <Route path="/clients" component={ClientsPage} />
           <Route path="/visibility" component={VisibilityPage} />
           <Route path="/atlas-leaderboard" component={LeaderboardPage} />
