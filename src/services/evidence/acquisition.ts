@@ -4,7 +4,8 @@ import type { EvidenceRecord } from "./evidence";
 /** An evidence source. Collectors never throw; a failure is an outcome, never evidence. */
 export interface CollectorOutcome {
   source: string;
-  status: "collected" | "skipped" | "failed";
+  /** COLLECTED: the source was read (possibly with no usable fields). UNAVAILABLE: nothing to read or nothing usable was served. FAILED: policy block or technical failure. */
+  status: "COLLECTED" | "UNAVAILABLE" | "FAILED";
   records: EvidenceRecord[];
   failure?: { code: string; message: string };
   hops?: string[];
@@ -22,7 +23,7 @@ export async function acquireEvidence(business: BusinessIntelligence, collectors
     try {
       outcomes.push(await collector.collect(business));
     } catch (e) {
-      outcomes.push({ source: collector.source, status: "failed", records: [], failure: { code: "collector_error", message: e instanceof Error ? e.message : "unknown error" } });
+      outcomes.push({ source: collector.source, status: "FAILED", records: [], failure: { code: "collector_error", message: e instanceof Error ? e.message : "unknown error" } });
     }
   }
   const byId = new Map<string, EvidenceRecord>();

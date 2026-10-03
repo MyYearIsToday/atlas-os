@@ -16,7 +16,7 @@ export class PeerBenchmarkCollector implements EvidenceCollector {
   constructor(private options: { provider: BusinessDiscoveryProvider; radiusMeters?: number; sourceUrl: string; nowIso?: () => string }) {}
 
   async collect(business: BusinessIntelligence): Promise<CollectorOutcome> {
-    const skip = (code: string, message: string): CollectorOutcome => ({ source: this.source, status: "skipped", records: [], failure: { code, message } });
+    const skip = (code: string, message: string): CollectorOutcome => ({ source: this.source, status: "UNAVAILABLE", records: [], failure: { code, message } });
     if (typeof business.latitude !== "number" || typeof business.longitude !== "number") return skip("no_coordinates", "business has no coordinates");
     if (!business.category) return skip("no_category", "business has no category");
     const radiusMeters = this.options.radiusMeters ?? 2000;
@@ -34,9 +34,9 @@ export class PeerBenchmarkCollector implements EvidenceCollector {
         confidence: "MEDIUM", verificationStatus: "UNVERIFIED", collector: "connector", humanReviewRequired: false, observability: "OBSERVED_PRESENT",
         notes: "Directory coverage of websites is incomplete; treat the rate as a lower bound.",
       } as unknown as EvidenceRecord;
-      return { source: this.source, status: "collected", records: [record] };
+      return { source: this.source, status: "COLLECTED", records: [record] };
     } catch (e) {
-      return { source: this.source, status: "failed", records: [], failure: { code: "peer_lookup_failed", message: e instanceof Error ? e.message : "unknown error" } };
+      return { source: this.source, status: "FAILED", records: [], failure: { code: "peer_lookup_failed", message: e instanceof Error ? e.message : "unknown error" } };
     }
   }
 }

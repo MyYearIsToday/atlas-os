@@ -36,7 +36,7 @@ export interface EvidenceRecord {
   evidenceType: EvidenceType;
   confidence: ConfidenceLevel;
   verificationStatus: VerificationStatus;
-  collector: "scout_ai" | "human_scout" | "connector";
+  collector: "scout_ai" | "human_scout" | "connector" | "website_http";
   notes?: string;
   expiresAt?: string;
   humanReviewRequired: boolean;

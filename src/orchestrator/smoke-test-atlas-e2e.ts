@@ -129,7 +129,7 @@ const events = (o: AtlasOrchestrator) => o.log.all().map((e) => `${e.event}:${e.
   const at = (e: string) => log.indexOf(`${e}:SUCCESS`);
   check("[1-3] chain order: BusinessDiscovered -> EvidenceUpdated -> ScoreCalculated -> AuditGenerated, all SUCCESS", at("BusinessDiscovered") >= 0 && at("BusinessDiscovered") < at("EvidenceUpdated") && at("EvidenceUpdated") < at("ScoreCalculated") && at("ScoreCalculated") < at("AuditGenerated"));
   const obs = a.deps.store.observations.get(businessId) ?? [];
-  check("[1] real website + peer evidence was collected with provenance and persisted before scoring", obs.some((r) => r.field === "website.title" && r.sourceType === "official_website") && obs.some((r) => r.field === "peers.websiteRate") && obs.every((r) => r.evidenceId.startsWith(`ev:${businessId}:`)));
+  check("[1] real website + peer evidence was collected with provenance and persisted before scoring", obs.some((r) => r.field === "title" && r.sourceType === "public_business_page" && r.confidence === "MEDIUM" && r.humanReviewRequired === true && /^[0-9a-f]{64}$/.test(r.evidenceId)) && obs.some((r) => r.field === "peers.websiteRate"));
   const score = a.deps.store.scores.get(businessId);
   check("[1] score is numeric only because enough was observed (>=50%); threshold unchanged", typeof score?.overallScore === "number" && score.components.filter((c) => c.observability !== "NOT_OBSERVABLE").reduce((n, c) => n + c.weight, 0) >= 50);
   const tasks = a.deps.missionQueue.getSnapshot();

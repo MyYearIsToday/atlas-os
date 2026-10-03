@@ -203,7 +203,7 @@ const NOT_OBSERVED: Record<string, string> = {
   visibilityWeakness: "The business's own website has not been observed (none listed, or it could not be checked).",
   competitiveGap: "No peer benchmark has been collected.",
   commercialValue: "No commercial-value signal has been collected.",
-  conversionReadiness: "The business's own website has not been observed.",
+  conversionReadiness: "No contact or conversion signals have been collected.",
   demandIntent: "No demand-intent signal has been collected.",
   executionFeasibility: "No feasibility assessment has been made.",
 };
@@ -220,10 +220,9 @@ export function buildOpportunityInput(business: BusinessIntelligence, evidence: 
   const yes = (field: string) => rec(field)?.observability === "OBSERVED_PRESENT";
   const ids = (fields: string[]) => fields.map((f) => rec(f)?.evidenceId).filter((x): x is string => !!x);
   const profileFields = 6;
-  const reach = rec("website.reachable");
-  const reachValue = (reach as unknown as { value?: { https?: boolean } } | undefined)?.value;
-  const reachable = reach?.observability === "OBSERVED_PRESENT";
-  const htmlObserved = ["website.title", "website.metaDescription", "website.structuredData", "website.socialLinks", "website.viewport", "website.contactLink", "website.contactForm"].some((f) => !!rec(f));
+  const pageFields: Array<[string, string]> = [["page title", "title"], ["meta description", "meta_description"], ["primary heading", "primary_heading"]];
+  // Evidence only exists for extracted fields, so any HTML field proves a page was actually read.
+  const pageRead = pageFields.some(([, f]) => !!rec(f));
 
   const ratio = (key: keyof typeof OPPORTUNITY_WEIGHTS, checks: Array<[string, boolean]>, refs: string[], confidence: "HIGH" | "MEDIUM", why: string): Component => {
     const passed = checks.filter(([, ok]) => ok).length;
@@ -239,14 +238,8 @@ export function buildOpportunityInput(business: BusinessIntelligence, evidence: 
     if (key === "evidenceQuality") {
       return { key, weight, maxValue: profileFields, rawValue: evidence.length, normalizedValue: evidence.length / profileFields, evidenceRefs: evidence.map((e) => e.id), confidence: "MEDIUM" as const, observability: "OBSERVED_PRESENT" as const, explanation: `${evidence.length} of ${profileFields} profile fields were returned by the discovery provider.` };
     }
-    if (key === "visibilityWeakness" && reach) {
-      const checks: Array<[string, boolean]> = [["website listed", true], ["reachable", reachable], ["served over HTTPS", reachable && reachValue?.https === true]];
-      if (htmlObserved || !reachable) for (const [name, f] of [["page title", "website.title"], ["meta description", "website.metaDescription"], ["structured data", "website.structuredData"], ["social links", "website.socialLinks"]] as const) checks.push([name, reachable && yes(f)]);
-      return ratio(key, checks, ids(["website.reachable", "website.title", "website.metaDescription", "website.structuredData", "website.socialLinks"]), "HIGH", "Digital presence of the business's own website");
-    }
-    if (key === "conversionReadiness" && reach && (htmlObserved || !reachable)) {
-      const checks: Array<[string, boolean]> = [["HTTPS", reachable && reachValue?.https === true], ["mobile viewport", reachable && yes("website.viewport")], ["phone/email link", reachable && yes("website.contactLink")], ["contact form", reachable && yes("website.contactForm")]];
-      return ratio(key, checks, ids(["website.reachable", "website.viewport", "website.contactLink", "website.contactForm"]), "HIGH", "Ability of the website to turn a visit into contact");
+    if (key === "visibilityWeakness" && pageRead) {
+      return ratio(key, pageFields.map(([name, f]) => [name, yes(f)] as [string, boolean]), ids(pageFields.map(([, f]) => f)), "MEDIUM", "Basic content of a public web page for this business (ownership not independently verified)");
     }
     const peers = rec("peers.websiteRate") as unknown as { value?: { websiteRate: number; subjectHasWebsite: boolean; peerCount: number; peersWithWebsite: number }; evidenceId: string } | undefined;
     if (key === "competitiveGap" && peers?.value) {

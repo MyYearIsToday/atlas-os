@@ -57,7 +57,7 @@ export function registerRealHandlers(registry: HandlerRegistry, config: Orchestr
         observations = acquired.records;
         store.observations.set(business.id, observations);
         for (const outcome of acquired.outcomes) {
-          store.record({ stage: "evidence", event: "BusinessDiscovered", businessId: business.id, handler: `collector:${outcome.source}`, state: `${outcome.status}, ${outcome.records.length} record(s)${outcome.failure ? ` [${outcome.failure.code}]` : ""}`, ...(outcome.status === "failed" && outcome.failure ? { error: outcome.failure.message } : {}) });
+          store.record({ stage: "evidence", event: "BusinessDiscovered", businessId: business.id, handler: `collector:${outcome.source}`, state: `${outcome.status}, ${outcome.records.length} record(s)${outcome.failure ? ` [${outcome.failure.code}]` : ""}`, ...(outcome.status === "FAILED" && outcome.failure ? { error: outcome.failure.message } : {}) });
         }
       }
       store.record({ ...base, state: `${evidence.length} provenance + ${observations.length} observed evidence items recorded`, nextEvent: "EvidenceUpdated" });

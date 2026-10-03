@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import dns from "node:dns/promises";
 import http from "node:http";
 import https from "node:https";
@@ -113,7 +114,7 @@ export const defaultResolve: ResolveFn = async (hostname) =>
   (await dns.lookup(hostname, { all: true, verbatim: true })).map((r) => ({ address: r.address, family: (r.family === 6 ? 6 : 4) as 4 | 6 }));
 
 // ---------- pinned request ----------
-const USER_AGENT = "AtlasEvidenceBot/1.0 (+business evidence observation; single GET per page)";
+const USER_AGENT = "AtlasOS-PublicEvidence/1.0";
 const connectErrors = new Set(["ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "ECONNRESET", "EAI_AGAIN"]);
 
 /** Connects to the already-validated address (the lookup hook returns it; DNS is never consulted again). */
@@ -176,8 +177,14 @@ function attrs(tag: string): Record<string, string> {
 const tagsOf = (html: string, name: string) => html.match(new RegExp(`<${name}\\b(?:"[^"]*"|'[^']*'|[^'">])*>`, "gi")) ?? [];
 const SOCIAL = ["facebook.com", "instagram.com", "x.com", "twitter.com", "linkedin.com", "tiktok.com", "youtube.com"];
 
+/** Limits fixed by the Objective 1A contract. Callers may tighten them but never exceed the maximums. */
+export const LIMITS = { maxRedirects: 4, defaultTimeoutMs: 8000, maxTimeoutMs: 30000, defaultMaxBytes: 1024 * 1024, maxMaxBytes: 2 * 1024 * 1024, pageTextMaxChars: 2000 } as const;
+const bounded = (value: number | undefined, fallback: number, max: number) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(value, max) : fallback);
+
+export const DOMAIN_OWNERSHIP_NOTE = "Observed on a public web page. Domain ownership has not been independently verified; this page is not confirmed to be the business's official website.";
+
 export interface HtmlFacts {
-  title: string | null; metaDescription: string | null; viewport: boolean; structuredDataTypes: string[];
+  title: string | null; primaryHeading: string | null; metaDescription: string | null; viewport: boolean; structuredDataTypes: string[];
   socialPlatforms: string[]; contactLink: boolean; contactForm: boolean;
 }
 
@@ -206,8 +213,11 @@ export function analyzeHtml(html: string): HtmlFacts {
   }
   const title = titleMatch ? decode(titleMatch[1]).slice(0, 200) : "";
   const description = metaContent("description");
+  const h1 = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  const heading = h1 ? decode(h1[1].replace(/<[^>]*>/g, " ")).slice(0, 200) : "";
   return {
     title: title || null,
+    primaryHeading: heading || null,
     metaDescription: description && decode(description) ? decode(description).slice(0, 400) : null,
     viewport: !!metaContent("viewport"),
     structuredDataTypes: [...types].sort(),
@@ -232,22 +242,29 @@ export class WebsiteEvidenceCollector implements EvidenceCollector {
     this.o = {
       resolve: options.resolve ?? defaultResolve, request: options.request ?? defaultRequest,
       nowIso: options.nowIso ?? (() => new Date().toISOString()),
-      perRequestTimeoutMs: options.perRequestTimeoutMs ?? 8000, overallDeadlineMs: options.overallDeadlineMs ?? 20000,
-      maxRedirects: options.maxRedirects ?? 3, maxBytes: options.maxBytes ?? 512 * 1024, maxAddresses: options.maxAddresses ?? 4,
+      perRequestTimeoutMs: bounded(options.perRequestTimeoutMs, LIMITS.defaultTimeoutMs, LIMITS.maxTimeoutMs), overallDeadlineMs: options.overallDeadlineMs ?? 20000,
+      maxRedirects: Math.min(Math.max(Math.trunc(options.maxRedirects ?? LIMITS.maxRedirects), 0), LIMITS.maxRedirects), maxBytes: bounded(options.maxBytes, LIMITS.defaultMaxBytes, LIMITS.maxMaxBytes), maxAddresses: options.maxAddresses ?? 4,
     };
   }
 
   async collect(business: BusinessIntelligence): Promise<CollectorOutcome> {
-    if (!business.website) return { source: this.source, status: "skipped", records: [], failure: { code: "no_website", message: "no website in the discovery record" } };
+    if (!business.website) return { source: this.source, status: "UNAVAILABLE", records: [], failure: { code: "no_website", message: "no website in the discovery record" } };
     const started = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new CollectionFailure("deadline_exceeded", "overall collection deadline exceeded")), this.o.overallDeadlineMs); });
       const fetched = await Promise.race([this.fetchPage(business.website, started), deadline]);
-      return { source: this.source, status: "collected", records: this.toRecords(business, fetched), hops: fetched.hops };
+      const { response } = fetched;
+      const type = (response.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+      const unavailable = (code: string, message: string): CollectorOutcome => ({ source: this.source, status: "UNAVAILABLE", records: [], failure: { code, message }, hops: fetched.hops });
+      if (response.status >= 400) return unavailable(`http_${response.status}`, `the website responded with HTTP ${response.status}`);
+      if (response.status >= 300) return unavailable("redirect_without_location", "the website redirected without a usable Location");
+      if (type !== "text/html" && type !== "text/plain") return unavailable("unsupported_content_type", `content type "${type || "unknown"}" is not text/html or text/plain`);
+      // Request succeeded: COLLECTED even when nothing extractable was found (empty evidence, never fabricated).
+      return { source: this.source, status: "COLLECTED", records: this.toRecords(business, fetched, type), hops: fetched.hops };
     } catch (e) {
       const failure = e instanceof CollectionFailure ? { code: e.code, message: e.message } : { code: "fetch_failed", message: e instanceof Error ? e.message : "unknown error" };
-      return { source: this.source, status: "failed", records: [], failure };
+      return { source: this.source, status: "FAILED", records: [], failure };
     } finally {
       clearTimeout(timer);
     }
@@ -294,40 +311,39 @@ export class WebsiteEvidenceCollector implements EvidenceCollector {
     throw new CollectionFailure("too_many_redirects", "redirect limit exceeded");
   }
 
-  private toRecords(business: BusinessIntelligence, fetched: { response: HttpResponseLite; finalUrl: URL; hops: string[] }): EvidenceRecord[] {
-    const { response, finalUrl, hops } = fetched;
+  /** Conservative public-page evidence: only extracted fields, MEDIUM confidence, UNVERIFIED, flagged for human review. */
+  private toRecords(business: BusinessIntelligence, fetched: { response: HttpResponseLite; finalUrl: URL }, type: string): EvidenceRecord[] {
+    const { response, finalUrl } = fetched;
     const at = this.o.nowIso();
-    const make = (field: string, value: unknown, present: boolean, type: "direct_observation" | "structured_data" = "direct_observation"): EvidenceRecord => ({
-      evidenceId: `ev:${business.id}:website.${field}`,
+    const url = finalUrl.toString();
+    const note = response.truncated ? `${DOMAIN_OWNERSHIP_NOTE} The page was cut off at the response-size limit.` : DOMAIN_OWNERSHIP_NOTE;
+    const make = (field: string, value: string): EvidenceRecord => ({
+      // Same business + URL + field + value always yields the same ID.
+      evidenceId: createHash("sha256").update(JSON.stringify([business.id, url, field, value])).digest("hex"),
       businessId: business.id,
-      field: `website.${field}`,
+      field,
       value,
-      sourceType: "official_website",
-      sourceUrl: finalUrl.toString(),
-      evidenceType: type,
+      sourceType: "public_business_page",
+      sourceUrl: url,
+      evidenceType: "direct_observation",
       observedAt: at,
       retrievedAt: at,
-      confidence: "HIGH",
+      confidence: "MEDIUM",
       verificationStatus: "UNVERIFIED",
-      collector: "connector",
-      humanReviewRequired: false,
-      observability: present ? "OBSERVED_PRESENT" : "OBSERVED_ABSENT",
-    } as unknown as EvidenceRecord);
-
-    const type = (response.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
-    const records = [make("reachable", { status: response.status, finalUrl: finalUrl.toString(), https: finalUrl.protocol === "https:", contentType: type || null, truncated: response.truncated, redirects: hops.length - 1 }, response.status >= 200 && response.status < 400)];
-    if (response.status >= 400 || type !== "text/html") return records;
+      collector: "website_http",
+      notes: note,
+      humanReviewRequired: true,
+      observability: "OBSERVED_PRESENT",
+    });
+    if (type === "text/plain") {
+      const text = response.body.replace(/\s+/g, " ").trim().slice(0, LIMITS.pageTextMaxChars);
+      return text ? [make("page_text", text)] : [];
+    }
     const facts = analyzeHtml(response.body);
-    const maybe = (field: string, value: unknown, present: boolean, kind?: "structured_data") => {
-      if (present || !response.truncated) records.push(make(field, value, present, kind)); // absence is only claimed for a fully read page
-    };
-    maybe("title", facts.title, facts.title !== null);
-    maybe("metaDescription", facts.metaDescription, facts.metaDescription !== null);
-    maybe("viewport", facts.viewport, facts.viewport);
-    maybe("structuredData", facts.structuredDataTypes, facts.structuredDataTypes.length > 0, "structured_data");
-    maybe("socialLinks", facts.socialPlatforms, facts.socialPlatforms.length > 0);
-    maybe("contactLink", facts.contactLink, facts.contactLink);
-    maybe("contactForm", facts.contactForm, facts.contactForm);
+    const records: EvidenceRecord[] = [];
+    if (facts.title) records.push(make("title", facts.title));
+    if (facts.metaDescription) records.push(make("meta_description", facts.metaDescription));
+    if (facts.primaryHeading) records.push(make("primary_heading", facts.primaryHeading));
     return records;
   }
 }
