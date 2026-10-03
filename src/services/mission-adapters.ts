@@ -50,7 +50,9 @@ export async function createMissionFromAuditRecommendation(
     assignedAI: "builder",
     clientId: businessId,
     priority: priorityFromEffort(recommendation.estimatedEffort),
-    approvalRequired: approvalLevelFromString(recommendation.approvalLevel),
+    // Missing/unknown approval metadata is never permission, and evidence collection is never automatic.
+    approvalRequired: recommendation.missionType === "collect_missing_evidence" ? "Approval Required" : approvalLevelFromString(recommendation.approvalLevel),
+    ...(recommendation.missionType ? { missionType: recommendation.missionType } : {}),
     dueDate: dueDate.toISOString().slice(0, 10),
     estimatedCost: 0,
     estimatedTime: "45 min",

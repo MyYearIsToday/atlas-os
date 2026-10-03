@@ -51,6 +51,8 @@ export interface Task {
   lineageId: string | null;
   lastFailureReason: string | null;
   lastFailureCode: string | null;
+  /** Explicit mission kind (e.g. internal_audit_summary). Absent means unclassified, which is never auto-executable. */
+  missionType?: string;
 }
 
 export type TaskInput = Omit<Task, 'taskId' | 'createdAt' | 'completedAt' | 'status' | 'executionHistory' | 'retryCount' | 'lineageId' | 'lastFailureReason' | 'lastFailureCode'> & {
@@ -519,11 +521,13 @@ export function summarizeToday(tasks: Task[]): TodaysMissionSummary {
  * browser store, but held in memory with no localStorage and no demo seed tasks, so server
  * pipelines never start with fabricated work. Missions are lost on restart.
  */
-export function createInMemoryMissionQueue(initial: Task[] = []): MissionQueueRepository {
+export function createInMemoryMissionQueue(initial: Task[] = [], onCommit?: (next: Task[], previous: Task[]) => void): MissionQueueRepository {
   let snapshot: Task[] = [...initial];
   const subscribers = new Set<() => void>();
   const commit = (next: Task[]) => {
+    const previous = snapshot;
     snapshot = next;
+    onCommit?.(next, previous);
     subscribers.forEach((notify) => notify());
   };
   const find = (id: string) => {

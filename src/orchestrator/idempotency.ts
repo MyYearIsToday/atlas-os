@@ -26,7 +26,15 @@ interface CacheRecord {
 export class ProcessedEventCache {
   private records = new Map<string, CacheRecord>();
 
+  /** Called for every newly processed event so a durable store can mirror the cache. */
+  onMark?: (eventId: string, processedAt: number) => void;
+
   constructor(private ttlMs: number) {}
+
+  /** Rebuilds an entry from durable storage after a restart (does not trigger onMark). */
+  restore(eventId: string, processedAt: number): void {
+    this.records.set(eventId, { processedAt, expiresAt: processedAt + this.ttlMs });
+  }
 
   /** True if this eventId was already processed and its TTL hasn't expired. Expired entries are treated as not-processed (and pruned). */
   hasProcessed(eventId: string, now: number = Date.now()): boolean {
@@ -41,6 +49,7 @@ export class ProcessedEventCache {
 
   markProcessed(eventId: string, now: number = Date.now()): void {
     this.records.set(eventId, { processedAt: now, expiresAt: now + this.ttlMs });
+    this.onMark?.(eventId, now);
   }
 
   size(): number {

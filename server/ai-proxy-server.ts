@@ -9,7 +9,13 @@ import { AtlasOrchestrator } from "../src/orchestrator/orchestrator";
 import { InMemoryBusinessRepository } from "../src/services/scout/business-repository";
 import { createScoutDiscoveryProvider } from "../src/services/scout/discovery-provider-factory";
 import { ScoutScheduler } from "../src/services/scout/scheduler";
-import { createPipelineDeps, type PipelineDeps } from "../src/orchestrator/atlas-pipeline";
+import { createDurablePipelineDeps, createPipelineDeps, type PipelineDeps } from "../src/orchestrator/atlas-pipeline";
+import { connectPostgres, type AtlasPersistence } from "../src/services/persistence/atlas-persistence";
+import { DurableBusinessRepository } from "../src/services/scout/durable-business-repository";
+import { WebsiteEvidenceCollector } from "../src/services/evidence/website-collector";
+import { PeerBenchmarkCollector } from "../src/services/evidence/peer-collector";
+import { GeoapifyDiscoveryProvider } from "../src/services/scout/geoapify-discovery-provider";
+import type { EvidenceCollector } from "../src/services/evidence/acquisition";
 import { MissionRunner } from "../src/orchestrator/mission-runner";
 import { AutonomousWorkforce } from "../src/orchestrator/autonomous-workforce";
 import { ProviderRegistry } from "../src/workforce/provider-registry";
@@ -20,7 +26,32 @@ let scoutDiscoveryEnabled = false;
 /** The scheduler's own repository + orchestrator, shared with manual entry so both feed one pipeline. */
 let scoutPipeline: { repository: InMemoryBusinessRepository; orchestrator: AtlasOrchestrator } | null = null;
 /** Downstream Atlas pipeline (evidence -> score -> audit -> mission). Opt-in via ATLAS_PIPELINE_ENABLED=true. */
-let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean } | null = null;
+let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean; persistence: AtlasPersistence | null; migrations: number[] } | null = null;
+
+/**
+ * Durable state for the Atlas pipeline. With ATLAS_PIPELINE_ENABLED=true on Render/production,
+ * DATABASE_URL is mandatory and a connection or migration failure is a startup error: production must
+ * never silently run from RAM. Local development without DATABASE_URL runs ephemeral and says so.
+ */
+async function initAtlasPersistence(): Promise<{ persistence: AtlasPersistence | null; applied: number[] }> {
+  if (process.env.ATLAS_PIPELINE_ENABLED !== "true") return { persistence: null, applied: [] };
+  const production = process.env.NODE_ENV === "production" || process.env.RENDER === "true";
+  if (!process.env.DATABASE_URL) {
+    if (production) throw new Error("ATLAS_PIPELINE_ENABLED=true requires DATABASE_URL in production; refusing to start with non-durable state");
+    console.warn("[atlas-persistence] DATABASE_URL not set: pipeline state is EPHEMERAL and will be lost on restart (development only)");
+    return { persistence: null, applied: [] };
+  }
+  const persistence = await connectPostgres(process.env.DATABASE_URL);
+  const { applied, current } = await persistence.migrate();
+  console.log(`[atlas-persistence] connected; schema version ${current}${applied.length ? `, applied migrations ${applied.join(",")}` : ", no pending migrations"}`);
+  return { persistence, applied };
+}
+
+function buildEvidenceCollectors(): EvidenceCollector[] {
+  const collectors: EvidenceCollector[] = [new WebsiteEvidenceCollector()];
+  if (process.env.GEOAPIFY_API_KEY) collectors.push(new PeerBenchmarkCollector({ provider: new GeoapifyDiscoveryProvider(), sourceUrl: "https://api.geoapify.com/v2/places" }));
+  return collectors;
+}
 
 /**
  * Sprint 5D/5E — trusted server/edge execution boundary.
@@ -212,6 +243,8 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
         const missions = deps.missionQueue.getSnapshot();
         sendJson(res, 200, {
           missionExecutionEnabled: executionEnabled,
+          durable: !!atlasPipeline.persistence,
+          persistence: atlasPipeline.persistence ? { ...atlasPipeline.persistence.health(), appliedMigrations: atlasPipeline.migrations } : null,
           counts: { businesses: deps.store.businesses.size, scores: deps.store.scores.size, scoresWithheld: [...deps.store.scores.values()].filter((v) => v.overallScore === null).length, audits: deps.store.audits.size, missions: missions.length },
           missions: missions.map((t) => ({ taskId: t.taskId, title: t.title, businessId: t.clientId, status: t.status, approvalRequired: t.approvalRequired })),
           trace: deps.store.trace.slice(-200),
@@ -233,6 +266,7 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
           return;
         }
         const summary = await atlasPipeline.runner.run(body.taskId, { approvedByHuman: body.approvedByHuman === true, approvedByCeo: body.approvedByCeo === true });
+        await atlasPipeline.persistence?.flush(); // the response is sent only after the execution result has been written
         const status = summary.outcome === "NOT_FOUND" ? 404 : summary.outcome === "DISABLED" ? 409 : 200;
         console.log(`[atlas-pipeline][execute] outcome=${summary.outcome} executed=${summary.executed}`);
         sendJson(res, status, summary);
@@ -263,8 +297,9 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
         // dispatch() records failures instead of throwing, so report the orchestrator's own outcome.
         const dispatched = orchestrator.log.all().slice(logged).filter((entry) => entry.event === "BusinessDiscovered");
         const dispatch = dispatched.length === 1 ? dispatched[0].outcome : "UNKNOWN";
+        await atlasPipeline?.persistence?.flush(); // acknowledge only after queued writes have been attempted
         console.log(`[atlas-scout][manual] action=${result.outcome.action} duplicateStatus=${result.outcome.duplicateStatus} dispatch=${dispatch}`);
-        sendJson(res, 200, { ok: true, businessId: result.outcome.businessId, action: result.outcome.action, duplicateStatus: result.outcome.duplicateStatus, dispatch });
+        sendJson(res, 200, { ok: true, businessId: result.outcome.businessId, action: result.outcome.action, duplicateStatus: result.outcome.duplicateStatus, dispatch, ...(atlasPipeline?.persistence ? { persisted: atlasPipeline.persistence.health().ok } : {}) });
         logRequest(method, url, 200, Date.now() - started);
         return;
       }
@@ -294,7 +329,9 @@ function requiredScoutNumber(key: string, min: number, max: number, integer = fa
  * available and discovery stopped; the deterministic test provider remains
  * available to isolated tests.
  */
-function startScoutScheduler(): ScoutScheduler | null {
+class FatalStartupError extends Error {}
+
+async function startScoutScheduler(persistence: AtlasPersistence | null, applied: number[]): Promise<ScoutScheduler | null> {
   if (process.env.SCOUT_DISCOVERY_ENABLED !== "true") {
     console.log("[atlas-scout] discovery disabled (SCOUT_DISCOVERY_ENABLED is not true)");
     return null;
@@ -320,23 +357,39 @@ function startScoutScheduler(): ScoutScheduler | null {
       throw new Error("SCOUT_DISCOVERY_CATEGORIES contains an invalid value");
     }
 
-    const pipelineDeps = process.env.ATLAS_PIPELINE_ENABLED === "true"
-      ? createPipelineDeps({ allowedSources: process.env.ATLAS_PIPELINE_SOURCES?.split(",").map((v) => v.trim()).filter(Boolean) })
-      : undefined;
+    const pipelineOptions = { allowedSources: process.env.ATLAS_PIPELINE_SOURCES?.split(",").map((v) => v.trim()).filter(Boolean), collectors: buildEvidenceCollectors() };
+    let pipelineDeps: PipelineDeps | undefined;
+    let ledger = new OperationalLedger();
+    let repository: InMemoryBusinessRepository = new InMemoryBusinessRepository();
+    if (process.env.ATLAS_PIPELINE_ENABLED === "true") {
+      if (persistence) {
+        try {
+          const durable = await createDurablePipelineDeps(persistence, pipelineOptions);
+          pipelineDeps = durable.deps;
+          ledger = durable.ledger;
+          const durableRepository = new DurableBusinessRepository(persistence);
+          const restored = await durableRepository.hydrate();
+          repository = durableRepository;
+          console.log(`[atlas-persistence] hydrated ${JSON.stringify({ ...durable.hydrated, scoutBusinesses: restored.businesses })}`);
+        } catch (hydrationError) {
+          throw new FatalStartupError(`hydration failed: ${hydrationError instanceof Error ? hydrationError.message : "unknown"}`);
+        }
+      } else {
+        pipelineDeps = createPipelineDeps(pipelineOptions);
+      }
+    }
     const orchestrator = new AtlasOrchestrator(undefined, true, pipelineDeps);
     if (pipelineDeps) {
       // Execution calls paid/rate-limited AI providers, so it is a second, separate opt-in.
       const executionEnabled = process.env.ATLAS_MISSION_EXECUTION_ENABLED === "true";
-      const ledger = new OperationalLedger();
       const providerRegistry = new ProviderRegistry();
       if (executionEnabled) Object.values(buildProviders()).forEach((provider) => providerRegistry.registerProvider(provider));
       const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: defaultWorkforceConfig, ledger, orchestrator });
       const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled });
       pipelineDeps.onMissionCreated = (task) => runner.autoExecute(task);
-      atlasPipeline = { deps: pipelineDeps, runner, ledger, executionEnabled };
-      console.log(`[atlas-pipeline] enabled sources=${pipelineDeps.allowedSources?.join(",") ?? "all"} missionExecution=${executionEnabled}`);
+      atlasPipeline = { deps: pipelineDeps, runner, ledger, executionEnabled, persistence, migrations: applied };
+      console.log(`[atlas-pipeline] enabled sources=${pipelineDeps.allowedSources?.join(",") ?? "all"} collectors=${(pipelineDeps.collectors ?? []).map((c) => c.source).join(",") || "none"} durable=${!!persistence} missionExecution=${executionEnabled}`);
     }
-    const repository = new InMemoryBusinessRepository();
     scheduler = new ScoutScheduler({
       provider: createScoutDiscoveryProvider(),
       repository,
@@ -372,6 +425,7 @@ function startScoutScheduler(): ScoutScheduler | null {
     scheduler?.stop();
     scoutPipeline = null;
     atlasPipeline = null;
+    if (error instanceof FatalStartupError) throw error; // durable-state failures must stop the server, not degrade silently
     const reason = error instanceof Error ? error.message : "invalid startup configuration";
     console.warn(`[atlas-scout] discovery not started: ${reason}`);
     return null;
@@ -383,12 +437,24 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // Render sets PORT; AI_PROXY_PORT is a local-dev fallback name.
   const port = Number(process.env.PORT ?? process.env.AI_PROXY_PORT ?? 8787);
   const host = "0.0.0.0"; // required by Render — binding to localhost only would make the service unreachable
-  const scoutScheduler = startScoutScheduler();
+  let persistenceHandle: AtlasPersistence | null = null;
+  let scoutScheduler: ScoutScheduler | null = null;
+  try {
+    const init = await initAtlasPersistence();
+    persistenceHandle = init.persistence;
+    scoutScheduler = await startScoutScheduler(init.persistence, init.applied); // hydrates before the port opens
+  } catch (error) {
+    console.error(`[atlas-persistence] FATAL startup error: ${error instanceof Error ? error.message : "unknown"}`);
+    process.exit(1);
+  }
   const server = createAiProxyServer();
   server.on("close", () => scoutScheduler?.stop());
   const shutdown = () => {
     scoutScheduler?.stop();
-    server.close(() => process.exit(0));
+    server.close(() => {
+      // Wait for queued writes, then release the pool, so a deploy never drops acknowledged state.
+      (persistenceHandle ? persistenceHandle.close() : Promise.resolve()).catch(() => undefined).finally(() => process.exit(0));
+    });
   };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);

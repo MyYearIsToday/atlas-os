@@ -3,10 +3,12 @@ import { calculateOpportunityScore } from "../services/scoring/opportunity-score
 import { generateAudit } from "../services/audit/generate-audit";
 import { createMissionFromAuditRecommendation } from "../services/mission-adapters";
 import type { BusinessIntelligence } from "../services/evidence/business-intelligence";
+import type { EvidenceRecord } from "../services/evidence/evidence";
 import { profitLoss } from "../services/finance/metrics";
 import { createSnapshot } from "../services/finance/snapshot";
 import type { HandlerRegistry, RegisteredHandlerResult } from "./handler-registry";
 import type { OrchestrationConfig } from "./orchestration-types";
+import { acquireEvidence } from "../services/evidence/acquisition";
 import { applyScoringGate, buildAuditInput, buildOpportunityInput, buildProvenanceEvidence, sourceAllowed, type PipelineDeps } from "./atlas-pipeline";
 
 /**
@@ -48,10 +50,20 @@ export function registerRealHandlers(registry: HandlerRegistry, config: Orchestr
       store.started.add(business.id);
       const evidence = buildProvenanceEvidence(business);
       store.evidence.set(business.id, evidence);
-      store.record({ ...base, state: `${evidence.length} provenance evidence items recorded`, nextEvent: "EvidenceUpdated" });
+      let observations: EvidenceRecord[] = [];
+      if (pipeline.collectors?.length) {
+        // Real evidence acquisition. Collectors never throw; a failed source is a trace entry, never evidence.
+        const acquired = await acquireEvidence(business, pipeline.collectors);
+        observations = acquired.records;
+        store.observations.set(business.id, observations);
+        for (const outcome of acquired.outcomes) {
+          store.record({ stage: "evidence", event: "BusinessDiscovered", businessId: business.id, handler: `collector:${outcome.source}`, state: `${outcome.status}, ${outcome.records.length} record(s)${outcome.failure ? ` [${outcome.failure.code}]` : ""}`, ...(outcome.status === "failed" && outcome.failure ? { error: outcome.failure.message } : {}) });
+        }
+      }
+      store.record({ ...base, state: `${evidence.length} provenance + ${observations.length} observed evidence items recorded`, nextEvent: "EvidenceUpdated" });
       return {
         output: { needsReview, pipeline: "started", evidenceItems: evidence.length },
-        nextEvent: { type: "EvidenceUpdated", payload: { businessId: business.id, opportunityInput: buildOpportunityInput(business, evidence) } },
+        nextEvent: { type: "EvidenceUpdated", payload: { businessId: business.id, opportunityInput: buildOpportunityInput(business, evidence, observations) } },
       };
     }
     // No further chaining: qualifying a business still requires real
@@ -81,7 +93,7 @@ export function registerRealHandlers(registry: HandlerRegistry, config: Orchestr
         // The handler's confidence is in its own determination. "Evidence is insufficient, so the score is
         // withheld" is certain; the score's low evidence confidence stays visible inside the output.
         confidence: outcome.scorable ? outcome.score.confidence.numeric : 1,
-        nextEvent: { type: "ScoreCalculated", payload: { businessId: business.id, opportunityScore: outcome.score, auditInput: buildAuditInput(business, store.evidence.get(business.id) ?? [], outcome) } },
+        nextEvent: { type: "ScoreCalculated", payload: { businessId: business.id, opportunityScore: outcome.score, auditInput: buildAuditInput(business, store.evidence.get(business.id) ?? [], outcome, store.observations.get(business.id) ?? []) } },
       };
     }
     // Cannot honestly chain to ScoreCalculated: that event also requires a
@@ -126,6 +138,9 @@ export function registerRealHandlers(registry: HandlerRegistry, config: Orchestr
       state: `${createdTasks.length} mission(s) queued: ${createdTasks.map((t) => `${t.taskId} [${t.approvalRequired}]`).join(", ") || "none"}`,
       nextEvent: first ? "MissionCreated" : undefined,
     });
+    // Only the first task rides the chained MissionCreated event; every additional task gets its own event so
+    // each one reaches the mission runner (and its approval/allowlist checks) exactly once.
+    for (const extra of createdTasks.slice(1)) await pipeline?.emit?.("MissionCreated", { businessId: event.payload.businessId, taskId: extra.taskId });
     return {
       output: { missionsCreated: createdTasks.length, taskIds: createdTasks.map((t) => t.taskId) },
       nextEvent: first ? { type: "MissionCreated", payload: { businessId: event.payload.businessId, taskId: first.taskId } } : undefined,

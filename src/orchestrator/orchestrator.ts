@@ -50,6 +50,12 @@ export class AtlasOrchestrator {
     this.workforceManager = new WorkforceManager(config);
     this.workflowEngine = new WorkflowEngine(this.bus, nextLineageId);
     this.processedEvents = new ProcessedEventCache(config.idempotencyPolicy.ttlMs);
+    if (pipeline) pipeline.emit = (type, payload) => this.dispatch(type, payload);
+    if (pipeline?.persistence) {
+      // Durable idempotency: replay survives restart. Both the worker and retry success branches call markProcessed.
+      for (const e of pipeline.restoredEvents ?? []) this.processedEvents.restore(e.eventId, e.processedAtMs);
+      this.processedEvents.onMark = (eventId, at) => pipeline.persistence!.markEvent(eventId, at);
+    }
     if (wireRealHandlers) registerRealHandlers(this.registry, config, pipeline);
   }
 

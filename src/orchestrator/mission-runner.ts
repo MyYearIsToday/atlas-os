@@ -2,6 +2,15 @@ import type { AutonomousWorkforce, MissionLifecycleDispatcher, MissionRunResult 
 import type { MissionQueueRepository, Task } from "../services/mission-queue";
 import type { OperationalLedger } from "../services/finance/ledger";
 import type { PipelineStore } from "./atlas-pipeline";
+import { INTERNAL_AUDIT_SUMMARY } from "./atlas-pipeline";
+
+/**
+ * Mission types that may start themselves. Allowlist, not denylist: anything unlisted (including a
+ * mission with no type) can only run after explicit human approval. A type earns a place here only if it
+ * reads Atlas-owned data and has no external side effect, financial commitment, messaging, publishing,
+ * purchasing or mutation of an outside system.
+ */
+export const AUTONOMOUS_SAFE_MISSION_TYPES: ReadonlySet<string> = new Set([INTERNAL_AUDIT_SUMMARY]);
 
 /**
  * Connects mission execution to the existing AutonomousWorkforce and closes the loop with a
@@ -38,23 +47,32 @@ export interface MissionRunSummary {
 export class MissionRunner {
   constructor(private options: MissionRunnerOptions) {}
 
-  /** Hook for the MissionCreated handler: only Auto missions may start themselves. */
+  /** Hook for the MissionCreated handler. Never throws: a failure here must not retry the audit handler and duplicate missions. */
   async autoExecute(task: Task): Promise<void> {
-    if (task.approvalRequired !== "Auto") {
-      this.options.store.record({ stage: "execution", event: "MissionCreated", businessId: task.clientId, handler: "mission-runner", state: `waiting for human approval (${task.approvalRequired})` });
-      return;
+    const { store } = this.options;
+    const note = (state: string, error?: string) => store.record({ stage: "execution", event: "MissionCreated", businessId: task.clientId, handler: "mission-runner", state, ...(error ? { error } : {}) });
+    try {
+      if (task.approvalRequired !== "Auto") return note(`waiting for human approval (${task.approvalRequired})`);
+      if (!task.missionType || !AUTONOMOUS_SAFE_MISSION_TYPES.has(task.missionType)) return note(`not auto-executed: mission type ${task.missionType ? `"${task.missionType}"` : "(none)"} is not on the autonomous-safe allowlist; needs human approval`);
+      if (!this.options.executionEnabled) return note("eligible for autonomous execution but mission execution is disabled");
+      await this.run(task.taskId, {}, { autonomous: true });
+    } catch (error) {
+      note("autonomous execution errored", error instanceof Error ? error.message : String(error));
     }
-    if (!this.options.executionEnabled) {
-      this.options.store.record({ stage: "execution", event: "MissionCreated", businessId: task.clientId, handler: "mission-runner", state: "Auto mission not executed: mission execution is disabled" });
-      return;
-    }
-    await this.run(task.taskId, {});
   }
 
-  async run(taskId: string, approval: { approvedByHuman?: boolean; approvedByCeo?: boolean }): Promise<MissionRunSummary> {
+  async run(taskId: string, approval: { approvedByHuman?: boolean; approvedByCeo?: boolean }, mode: { autonomous?: boolean } = {}): Promise<MissionRunSummary> {
     const { store, missionQueue, ledger, dispatcher, workforce } = this.options;
     const task = missionQueue.getSnapshot().find((t) => t.taskId === taskId);
     if (!task) return { taskId, executed: false, outcome: "NOT_FOUND", reason: "Task not found" };
+    if (task.status === "Completed") {
+      // Idempotent: a finished mission is never re-run, re-billed, or re-announced.
+      store.record({ stage: "execution", event: "MissionExecution", businessId: task.clientId, handler: "mission-runner", state: "already completed; no re-execution" });
+      return { taskId, executed: false, outcome: "COMPLETED", reason: "already completed", completedEventDispatched: false };
+    }
+    if (mode.autonomous && (task.approvalRequired !== "Auto" || !task.missionType || !AUTONOMOUS_SAFE_MISSION_TYPES.has(task.missionType))) {
+      return { taskId, executed: false, outcome: "BLOCKED", reason: "mission is not eligible for autonomous execution" };
+    }
     if (!this.options.executionEnabled) {
       store.record({ stage: "execution", event: "MissionExecution", businessId: task.clientId, handler: "mission-runner", state: "refused: mission execution is disabled", error: "ATLAS_MISSION_EXECUTION_ENABLED is not true" });
       return { taskId, executed: false, outcome: "DISABLED", reason: "Mission execution is disabled" };
