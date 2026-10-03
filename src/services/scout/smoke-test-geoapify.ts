@@ -52,6 +52,10 @@ check("most specific category is chosen", mapped?.category === "catering.restaur
 check("formatted address is used", mapped?.address === "Osu Kitchen, 12 Oxford St, Accra, Ghana");
 check("source metadata carries attribution", mapped?.sourceMetadata?.sourceId === "geoapify" && !!mapped.sourceMetadata.attribution);
 check("candidate never contains the API key", !JSON.stringify(mapped).includes(TEST_KEY));
+check("website and phone returned by Geoapify are carried on the candidate (used for peer benchmarking)", (() => {
+  const c = mapFeatureToCandidate({ type: "Feature", properties: { name: "Site Biz", place_id: "w1", website: " https://site.example ", contact: { phone: "+233 20 000 0000" } } });
+  return c?.website === "https://site.example" && c.phone === "+233 20 000 0000";
+})());
 check("unnamed features are skipped", mapFeatureToCandidate({ type: "Feature", properties: { place_id: "x" } }) === null && mapFeatureToCandidate({ properties: { name: "   " } }) === null);
 check("geometry supplies coordinates when properties lack them", (() => {
   const c = mapFeatureToCandidate({ properties: { name: "Geo Only", place_id: "g1" }, geometry: { type: "Point", coordinates: [1.5, 2.5] } });

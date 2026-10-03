@@ -14,6 +14,10 @@ import { defaultWorkforceConfig } from "../workforce/workforce-config";
  * pipeline store, in-memory mission queue, AutonomousWorkforce, ledger, finance handler) EXCEPT the
  * network call to the AI provider, which is the one external dependency and is stubbed at fetch().
  */
+import { newDb } from "pg-mem";
+import { PostgresAtlasPersistence, type SqlClient } from "../services/persistence/atlas-persistence";
+import { buildAtlas, stubCollectors } from "./atlas-test-harness";
+
 let failures = 0;
 function check(name: string, cond: boolean) {
   console.log(`${cond ? "PASS" : "FAIL"} — ${name}`);
@@ -105,6 +109,48 @@ const events = (o: AtlasOrchestrator) => o.log.all().map((e) => `${e.event}:${e.
   const missionsBefore = deps.missionQueue.getSnapshot().length;
   const possible = await submit("Golden Bean Cafe", { address: "Oxford Street, Osu" });
   check("a possible duplicate is held for human review and creates no second audit or mission", possible.ok && possible.outcome.duplicateStatus === "POSSIBLE_DUPLICATE" && deps.missionQueue.getSnapshot().length === missionsBefore && deps.store.trace.some((t) => /held for human duplicate review/.test(t.state)));
+}
+
+// ======================================================================================
+// Objectives 1-3 integrated: real evidence -> score -> audit -> missions -> approval -> safe
+// execution -> MissionCompleted -> PostgreSQL -> restart -> hydration -> duplicate replay.
+// Stubbed: only outbound HTTP (website transport + DNS, peer directory, AI provider).
+// ======================================================================================
+{
+  const adapter = newDb().adapters.createPg();
+  const connect = () => new PostgresAtlasPersistence(new adapter.Pool() as unknown as SqlClient);
+  const p1 = connect();
+  await p1.migrate();
+  const a = await buildAtlas({ executionEnabled: true, persistence: p1, collectors: stubCollectors() });
+  const result = await a.submit("Atlas Integrated Acceptance Cafe");
+  await p1.flush();
+  const businessId = result.ok ? result.outcome.businessId : "";
+  const log = a.events();
+  const at = (e: string) => log.indexOf(`${e}:SUCCESS`);
+  check("[1-3] chain order: BusinessDiscovered -> EvidenceUpdated -> ScoreCalculated -> AuditGenerated, all SUCCESS", at("BusinessDiscovered") >= 0 && at("BusinessDiscovered") < at("EvidenceUpdated") && at("EvidenceUpdated") < at("ScoreCalculated") && at("ScoreCalculated") < at("AuditGenerated"));
+  const obs = a.deps.store.observations.get(businessId) ?? [];
+  check("[1] real website + peer evidence was collected with provenance and persisted before scoring", obs.some((r) => r.field === "website.title" && r.sourceType === "official_website") && obs.some((r) => r.field === "peers.websiteRate") && obs.every((r) => r.evidenceId.startsWith(`ev:${businessId}:`)));
+  const score = a.deps.store.scores.get(businessId);
+  check("[1] score is numeric only because enough was observed (>=50%); threshold unchanged", typeof score?.overallScore === "number" && score.components.filter((c) => c.observability !== "NOT_OBSERVABLE").reduce((n, c) => n + c.weight, 0) >= 50);
+  const tasks = a.deps.missionQueue.getSnapshot();
+  const summary = tasks.find((t) => t.missionType === "internal_audit_summary")!;
+  const gated = tasks.filter((t) => t.approvalRequired === "Approval Required");
+  check("[3] only the safe summary mission ran by itself; every approval-required mission is waiting", summary.status === "Completed" && gated.length > 0 && gated.every((t) => t.status === "Pending"));
+  check("[3] MissionCompleted carried the real AI cost; no PaymentRecorded", log.includes("MissionCompleted:SUCCESS") && a.ledger.list().length === 1 && !log.some((e) => e.startsWith("PaymentRecorded")));
+  const blocked = await a.runner.run(gated[0].taskId, {});
+  const approved = await a.runner.run(gated[0].taskId, { approvedByHuman: true });
+  await p1.flush();
+  check("[3] approval-required mission: blocked -> explicit approval -> executed once", !blocked.executed && approved.executed && a.ledger.list().length === 2);
+
+  // ---- process replaced: only PostgreSQL survives ----
+  const p2 = connect();
+  await p2.migrate();
+  const b = await buildAtlas({ executionEnabled: true, persistence: p2, collectors: stubCollectors() });
+  check("[2] restart: business, evidence, score, audit, missions and ledger all hydrate", b.repository.list().length === 1 && (b.deps.store.observations.get(businessId)?.length ?? 0) === obs.length && b.deps.store.scores.get(businessId)?.overallScore === score?.overallScore && b.deps.store.audits.size === 1 && b.deps.missionQueue.getSnapshot().length === tasks.length && b.ledger.list().length === 2);
+  check("[2] restart: executed missions are still Completed and pending ones still Pending", b.deps.missionQueue.getSnapshot().filter((t) => t.status === "Completed").length === 2 && b.deps.missionQueue.getSnapshot().filter((t) => t.status === "Pending").length === tasks.length - 2);
+  const replay = await b.submit("Atlas Integrated Acceptance Cafe");
+  check("[2] duplicate replay after restart: no new business, audit, mission, AI call, ledger entry or MissionCompleted", replay.ok && replay.outcome.action === "UPDATED_EXISTING" && b.repository.list().length === 1 && b.deps.store.audits.size === 1 && b.deps.missionQueue.getSnapshot().length === tasks.length && b.ai.calls === 0 && b.ledger.list().length === 2 && !b.events().includes("MissionCompleted:SUCCESS"));
+  check("[2] database stayed healthy end to end", p1.health().ok && p2.health().ok);
 }
 
 console.log(failures === 0 ? "\nALL ATLAS E2E ACCEPTANCE TESTS PASSED" : `\n${failures} E2E TEST(S) FAILED`);
