@@ -14,6 +14,9 @@ interface GeoapifyFeature {
     place_id?: string;
     lat?: number;
     lon?: number;
+    website?: string;
+    phone?: string;
+    contact?: { phone?: string };
   };
   geometry?: { type?: string; coordinates?: number[] };
 }
@@ -72,6 +75,8 @@ export function mapFeatureToCandidate(feature: GeoapifyFeature): DiscoveryCandid
     latitude: typeof lat === "number" ? lat : undefined,
     longitude: typeof lon === "number" ? lon : undefined,
     address,
+    phone: (props?.contact?.phone ?? props?.phone)?.toString().trim() || undefined,
+    website: typeof props?.website === "string" && props.website.trim() ? props.website.trim() : undefined,
     source: "geoapify",
     sourceMetadata: {
       sourceId: "geoapify",
