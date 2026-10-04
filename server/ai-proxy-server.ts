@@ -16,6 +16,14 @@ import { WebsiteEvidenceCollector } from "../src/services/evidence/website-colle
 import { PeerBenchmarkCollector } from "../src/services/evidence/peer-collector";
 import { GeoapifyDiscoveryProvider } from "../src/services/scout/geoapify-discovery-provider";
 import type { EvidenceCollector } from "../src/services/evidence/acquisition";
+import { LifecycleStore } from "../src/services/autonomy/lifecycle-store";
+import { LifecycleError, ProspectService } from "../src/services/autonomy/prospects";
+import { DeliveryService } from "../src/services/autonomy/delivery";
+import { RevenueService } from "../src/services/autonomy/revenue";
+import { ApprovalService } from "../src/services/autonomy/approvals";
+import { AutonomyScheduler, createInternalExecutor, runAutonomyCycle } from "../src/services/autonomy/loop";
+import { readAutonomy, type AutonomyRuntime } from "../src/services/autonomy/observability";
+import { defaultAutonomyPolicy } from "../src/services/autonomy/policy";
 import { MissionRunner } from "../src/orchestrator/mission-runner";
 import { AutonomousWorkforce } from "../src/orchestrator/autonomous-workforce";
 import { ProviderRegistry } from "../src/workforce/provider-registry";
@@ -26,7 +34,7 @@ let scoutDiscoveryEnabled = false;
 /** The scheduler's own repository + orchestrator, shared with manual entry so both feed one pipeline. */
 let scoutPipeline: { repository: InMemoryBusinessRepository; orchestrator: AtlasOrchestrator } | null = null;
 /** Downstream Atlas pipeline (evidence -> score -> audit -> mission). Opt-in via ATLAS_PIPELINE_ENABLED=true. */
-let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean; persistence: AtlasPersistence | null; migrations: number[] } | null = null;
+let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean; persistence: AtlasPersistence | null; migrations: number[]; autonomy: AutonomyRuntime } | null = null;
 
 /**
  * Durable state for the Atlas pipeline. With ATLAS_PIPELINE_ENABLED=true on Render/production,
@@ -233,6 +241,33 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
         return;
       }
 
+      const parsedUrl = new URL(url, "http://local");
+      if (parsedUrl.pathname.startsWith("/api/atlas/autonomy/")) {
+        if (!atlasPipeline) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline is not enabled" } }); logRequest(method, parsedUrl.pathname, 503, Date.now() - started); return; }
+        const r = readAutonomy(method, parsedUrl.pathname, parsedUrl.searchParams, atlasPipeline.autonomy);
+        sendJson(res, r.status, r.body);
+        logRequest(method, parsedUrl.pathname, r.status, Date.now() - started);
+        return;
+      }
+      if (parsedUrl.pathname.startsWith("/api/atlas/approvals/")) {
+        if (method !== "POST") { sendJson(res, 405, { error: { code: "method_not_allowed", message: "approval operations are POST only" } }); logRequest(method, parsedUrl.pathname, 405, Date.now() - started); return; }
+        if (!atlasPipeline) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline is not enabled" } }); logRequest(method, parsedUrl.pathname, 503, Date.now() - started); return; }
+        const op = parsedUrl.pathname.slice("/api/atlas/approvals/".length);
+        let status = 200; let payload: unknown;
+        try {
+          payload = await atlasPipeline.autonomy.approvals.handle(op, await readJsonBody(req));
+          await atlasPipeline.persistence?.flush();
+        } catch (error) {
+          if (error instanceof LifecycleError) {
+            status = ({ human_required: 403, stale_version: 409, not_found: 404, unknown_operation: 404, invalid_transition: 409, invalid_artifact_transition: 409, invalid_state: 409, execution_unavailable: 409 } as Record<string, number>)[error.code] ?? 400;
+            payload = { error: { code: error.code, message: error.message } };
+          } else { status = 500; payload = { error: { code: "internal_error", message: "approval operation failed" } }; console.error(`[atlas-approvals] ${op} failed: ${error instanceof Error ? error.message : "unknown"}`); }
+        }
+        sendJson(res, status, payload);
+        logRequest(method, parsedUrl.pathname, status, Date.now() - started);
+        return;
+      }
+
       if (method === "GET" && url === "/api/atlas/pipeline") {
         if (!atlasPipeline) {
           sendJson(res, 503, { failed: true, code: "PROVIDER_UNAVAILABLE", reason: "Atlas pipeline is not enabled" });
@@ -331,6 +366,9 @@ function requiredScoutNumber(key: string, min: number, max: number, integer = fa
  */
 class FatalStartupError extends Error {}
 
+/** Stops the autonomy timer (used on shutdown; an in-flight cycle finishes and persists). */
+function atlasPipelineStop(): void { atlasPipeline?.autonomy.scheduler.stop(); }
+
 async function startScoutScheduler(persistence: AtlasPersistence | null, applied: number[]): Promise<ScoutScheduler | null> {
   if (process.env.SCOUT_DISCOVERY_ENABLED !== "true") {
     console.log("[atlas-scout] discovery disabled (SCOUT_DISCOVERY_ENABLED is not true)");
@@ -387,7 +425,30 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: defaultWorkforceConfig, ledger, orchestrator });
       const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled });
       pipelineDeps.onMissionCreated = (task) => runner.autoExecute(task);
-      atlasPipeline = { deps: pipelineDeps, runner, ledger, executionEnabled, persistence, migrations: applied };
+      // Autonomy layer (Objectives 4-10): lifecycles, approvals, loop, observability. The loop itself starts only when ATLAS_AUTONOMY_ENABLED=true.
+      const lifecycle = new LifecycleStore(persistence ?? undefined);
+      try { await lifecycle.hydrate(); } catch (hydrationError) { throw new FatalStartupError(`lifecycle hydration failed: ${hydrationError instanceof Error ? hydrationError.message : "unknown"}`); }
+      const resolveContact = (businessId: string) => { const phone = pipelineDeps!.store.businesses.get(businessId)?.phone; return phone ? ({ channel: "phone", address: phone, source: "business_record" } as const) : null; };
+      const prospects = new ProspectService(lifecycle, undefined, resolveContact);
+      const delivery = new DeliveryService(lifecycle, prospects, pipelineDeps.missionQueue);
+      const revenue = new RevenueService(lifecycle, prospects, ledger);
+      const approvals = new ApprovalService({ lifecycle, prospects, delivery, revenue, missionQueue: pipelineDeps.missionQueue, missionOutputs: pipelineDeps.store.missionOutputs, runMission: (taskId, approval) => runner.run(taskId, approval) });
+      const metricInputs = () => ({
+        prospects: [...lifecycle.prospects.values()], engagements: [...lifecycle.engagements.values()], invoices: [...lifecycle.invoices.values()], tasks: pipelineDeps!.missionQueue.getSnapshot(), ledger: ledger.list(),
+        approvals: [...lifecycle.approvals.values()], businesses: [...pipelineDeps!.store.businesses.values()].map((b) => ({ id: b.id, website: b.website, createdAt: b.createdAt })), observations: pipelineDeps!.store.observations,
+        audits: [...pipelineDeps!.store.audits.values()].map((a) => ({ businessId: a.businessId, generatedAt: a.generatedAt })), scores: pipelineDeps!.store.scores,
+      });
+      const execute = createInternalExecutor({ pipeline: pipelineDeps.store, collectors: pipelineDeps.collectors ?? [], missionQueue: pipelineDeps.missionQueue, lifecycle, dispatcher: orchestrator, prospects, delivery, revenue });
+      const cycleDeps = { policy: defaultAutonomyPolicy, lifecycle, pipeline: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, ledger, execute, metricInputs, persistenceHealthy: () => persistence?.health().ok ?? true };
+      const autonomyScheduler = new AutonomyScheduler(async (trigger) => { const c = await runAutonomyCycle(cycleDeps, trigger); await persistence?.flush(); return c; }, (e) => console.error(`[atlas-autonomy] cycle error: ${e instanceof Error ? e.message : "unknown"}`));
+      const autonomyEnabled = process.env.ATLAS_AUTONOMY_ENABLED === "true";
+      const autonomy: AutonomyRuntime = { policy: defaultAutonomyPolicy, lifecycle, pipeline: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, ledger, revenue, approvals, scheduler: autonomyScheduler, autonomyEnabled, executionEnabled, persistenceHealth: () => persistence?.health() ?? null, metricInputs, now: () => new Date().toISOString() };
+      if (autonomyEnabled) {
+        const intervalMs = Math.max(60_000, Number(process.env.ATLAS_AUTONOMY_INTERVAL_MS) || 900_000);
+        autonomyScheduler.start(intervalMs);
+        console.log(`[atlas-autonomy] scheduler started intervalMs=${intervalMs} missionExecution=${executionEnabled}`);
+      }
+      atlasPipeline = { deps: pipelineDeps, runner, ledger, executionEnabled, persistence, migrations: applied, autonomy };
       console.log(`[atlas-pipeline] enabled sources=${pipelineDeps.allowedSources?.join(",") ?? "all"} collectors=${(pipelineDeps.collectors ?? []).map((c) => c.source).join(",") || "none"} durable=${!!persistence} missionExecution=${executionEnabled}`);
     }
     scheduler = new ScoutScheduler({
@@ -451,6 +512,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   server.on("close", () => scoutScheduler?.stop());
   const shutdown = () => {
     scoutScheduler?.stop();
+    atlasPipelineStop();
     server.close(() => {
       // Wait for queued writes, then release the pool, so a deploy never drops acknowledged state.
       (persistenceHandle ? persistenceHandle.close() : Promise.resolve()).catch(() => undefined).finally(() => process.exit(0));

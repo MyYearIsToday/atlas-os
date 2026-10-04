@@ -10,7 +10,7 @@
 export type Collection =
   | "business" | "external_key" | "evidence" | "observations" | "score" | "audit"
   | "mission" | "mission_output" | "ledger" | "trace" | "started"
-  | "prospect" | "engagement" | "decision";
+  | "prospect" | "engagement" | "decision" | "invoice" | "approval" | "cycle" | "decision_exec" | "autonomy_state";
 
 export interface SqlClient {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, any>> }>;

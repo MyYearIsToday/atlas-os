@@ -6,6 +6,7 @@ import { defaultAutonomyPolicy, type AutonomyPolicy } from "./policy";
 import type { LifecycleStore } from "./lifecycle-store";
 import type { ProspectRecord } from "./prospects";
 import type { Engagement } from "./delivery";
+import { assessInvoiceEligibility, type InvoiceState } from "./revenue";
 
 /**
  * Autonomous Operations Controller (Objective 4): "what should Atlas work on next?"
@@ -33,25 +34,36 @@ export interface BusinessState {
   businessId: string; name: string; hasWebsite: boolean; pipelineStarted: boolean;
   observationCount: number; newestObservationAt: string | null; score: { scorable: boolean; overall: number | null } | null; auditId: string | null;
   missions: MissionState[]; prospect: ProspectRecord | null; engagement: Engagement | null;
+  /** Present only for businesses with an engagement. Absent = revenue is not tracked for this business (Objective 4 behavior). */
+  revenue?: { invoiceState: InvoiceState | null; eligible: boolean; reason: string | null };
 }
 export interface AutonomyState { now: string; businesses: BusinessState[]; spentTodayUsd: number }
 
 /** Reads durable state into the controller's input. Pure reads; nothing is mutated. */
 export function buildAutonomyState(input: { now: string; pipeline: PipelineStore; missions: Task[]; lifecycle: LifecycleStore; spentTodayUsd: number }): AutonomyState {
   const { pipeline, missions, lifecycle } = input;
-  const businesses: BusinessState[] = [...pipeline.businesses.values()].map((b) => {
+  const businesses: BusinessState[] = [...pipeline.businesses.values()].map((b): BusinessState => {
     const obs = pipeline.observations.get(b.id) ?? [];
     const score: OpportunityScore | undefined = pipeline.scores.get(b.id);
     const newest = obs.map((o) => o.observedAt).sort().pop() ?? null;
-    return {
+    const base: BusinessState = {
       businessId: b.id, name: b.canonicalName, hasWebsite: !!b.website, pipelineStarted: pipeline.started.has(b.id), observationCount: obs.length, newestObservationAt: newest,
       score: score ? { scorable: score.overallScore !== null, overall: score.overallScore } : null, auditId: pipeline.audits.get(b.id)?.auditId ?? null,
       missions: missions.filter((t) => t.clientId === b.id).map((t) => ({ taskId: t.taskId, missionType: t.missionType, status: t.status, approvalRequired: t.approvalRequired, retryCount: t.retryCount, lastFailureAt: t.status === "Failed" ? t.executionHistory.at(-1)?.completedAt ?? null : null })),
       prospect: lifecycle.prospects.get(`prospect:${b.id}`) ?? null,
       engagement: [...lifecycle.engagements.values()].find((e) => e.businessId === b.id) ?? null,
     };
+    return withRevenue(base, lifecycle);
   });
   return { now: input.now, businesses, spentTodayUsd: input.spentTodayUsd };
+}
+
+function withRevenue(base: BusinessState, lifecycle: LifecycleStore): BusinessState {
+  const e = base.engagement;
+  if (!e) return base;
+  const invoice = lifecycle.invoices.get(`invoice:${e.engagementId}`) ?? null;
+  const a = assessInvoiceEligibility(e, lifecycle.prospects.get(e.prospectId) ?? null);
+  return { ...base, revenue: { invoiceState: invoice?.state ?? null, eligible: a.eligible, reason: a.eligible ? null : a.reason } };
 }
 
 interface Ctx { policy: AutonomyPolicy; nowMs: number }
@@ -70,7 +82,7 @@ const ref = {
 /** Ordered: the first matching rule decides. Each rule is small, named, and independently testable. */
 export const RULES: Array<{ id: string; rule: Rule }> = [
   { id: "R01_TERMINAL", rule: (b) => {
-    if (b.engagement?.state === "COMPLETE") return { type: "NO_ACTION", ruleId: "R01_TERMINAL", reason: "engagement complete", refs: [ref.engagement(b.engagement)] };
+    if (b.engagement?.state === "COMPLETE" && (!b.revenue || b.revenue.invoiceState === "PAYMENT_RECONCILED")) return { type: "NO_ACTION", ruleId: "R01_TERMINAL", reason: "engagement complete", refs: [ref.engagement(b.engagement)] };
     if (b.prospect && ["LOST", "DORMANT"].includes(b.prospect.state)) return { type: "NO_ACTION", ruleId: "R01_TERMINAL", reason: `prospect is ${b.prospect.state}; only a human can reopen it`, refs: [ref.prospect(b.prospect)] };
     return null;
   } },
@@ -82,6 +94,21 @@ export const RULES: Array<{ id: string; rule: Rule }> = [
     if (exhausted) return { type: "WAIT_FOR_HUMAN", ruleId: "R02_FAILURE_GUARD", reason: `mission ${exhausted.taskId} exhausted its ${c.policy.maxRetries} retries; a human must decide`, refs, approval: "HUMAN" };
     const cooling = failed.find((m) => m.lastFailureAt && c.nowMs - Date.parse(m.lastFailureAt) < c.policy.failureCooldownMs);
     return cooling ? { type: "NO_ACTION", ruleId: "R02_FAILURE_GUARD", reason: "recent mission failure; cooling down", refs } : null;
+  } },
+  { id: "R03R_REVENUE", rule: (b) => {
+    const e = b.engagement, r = b.revenue;
+    if (!e || e.state !== "COMPLETE" || !r) return null;
+    const refs = [ref.engagement(e), `invoice:${e.engagementId}@${r.invoiceState ?? "none"}`];
+    switch (r.invoiceState) {
+      case null: return r.eligible
+        ? { type: "REQUEST_PAYMENT", ruleId: "R03R_REVENUE", reason: "engagement complete and the accepted proposal has a price: an invoice record is eligible (internal; a human prepares and sends it)", refs, approval: "NONE" }
+        : { type: "WAIT_FOR_HUMAN", ruleId: "R03R_REVENUE", reason: r.reason ?? "invoice is not eligible", refs, approval: "HUMAN" };
+      case "INVOICE_ELIGIBLE": return { type: "WAIT_FOR_HUMAN", ruleId: "R03R_REVENUE", reason: "a human must prepare the invoice", refs, approval: "HUMAN" };
+      case "PREPARED": return { type: "WAIT_FOR_HUMAN", ruleId: "R03R_REVENUE", reason: "a human must send the prepared invoice and record it", refs, approval: "HUMAN" };
+      case "SENT": case "PAYMENT_PENDING": return { type: "WAIT_FOR_EXTERNAL_EVENT", ruleId: "R03R_REVENUE", reason: "waiting for the customer's payment; only a human-recorded payment counts as revenue", refs };
+      case "PAYMENT_RECORDED": return { type: "RECONCILE_REVENUE", ruleId: "R03R_REVENUE", reason: "a payment is recorded and awaits human reconciliation against the external statement", refs, approval: "HUMAN" };
+      default: return null;
+    }
   } },
   { id: "R03_ENGAGEMENT", rule: (b) => {
     const e = b.engagement;
@@ -154,7 +181,7 @@ const PRIORITY: Record<DecisionType, number> = {
   DELIVER: 1, VERIFY_RESULT: 2, PREPARE_DELIVERY: 3, FOLLOW_UP: 4, CREATE_OUTREACH_MISSION: 5, GENERATE_AUDIT: 6, ANALYZE_OPPORTUNITY: 7, COLLECT_EVIDENCE: 8,
   DISCOVER_MORE: 9, REQUEST_PAYMENT: 10, RECONCILE_REVENUE: 11, WAIT_FOR_HUMAN: 12, WAIT_FOR_EXTERNAL_EVENT: 13, NO_ACTION: 14,
 };
-const ACTIONABLE = new Set<DecisionType>(["COLLECT_EVIDENCE", "ANALYZE_OPPORTUNITY", "GENERATE_AUDIT", "CREATE_OUTREACH_MISSION", "FOLLOW_UP", "PREPARE_DELIVERY", "DELIVER", "VERIFY_RESULT", "DISCOVER_MORE"]);
+const ACTIONABLE = new Set<DecisionType>(["REQUEST_PAYMENT", "RECONCILE_REVENUE", "COLLECT_EVIDENCE", "ANALYZE_OPPORTUNITY", "GENERATE_AUDIT", "CREATE_OUTREACH_MISSION", "FOLLOW_UP", "PREPARE_DELIVERY", "DELIVER", "VERIFY_RESULT", "DISCOVER_MORE"]);
 
 export function evaluateAutonomy(state: AutonomyState, policy: AutonomyPolicy = defaultAutonomyPolicy): Decision[] {
   const ctx: Ctx = { policy, nowMs: Date.parse(state.now) };
@@ -201,3 +228,6 @@ export function recordDecisions(store: LifecycleStore, decisions: Decision[]): n
   }
   return added;
 }
+
+/** Base ordering tier of a decision type (lower runs first). Exposed so bounded metric influence can be applied explicitly elsewhere. */
+export const decisionPriority = (type: DecisionType): number => PRIORITY[type];
