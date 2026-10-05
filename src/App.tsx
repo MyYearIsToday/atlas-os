@@ -6,13 +6,13 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { AtlasShell } from '@/components/atlas-shell';
 import {
   ClientsPage,
-  DashboardPage,
   EmployeesPage,
   FinancePage,
   LeaderboardPage,
   SettingsPage,
   VisibilityPage,
 } from '@/pages/atlas-pages';
+import { CommandCenterPage } from '@/pages/command-center-page';
 import { CrmPage } from '@/pages/crm-page';
 import { MissionQueuePage } from '@/pages/mission-queue-page';
 import { ScoutPage } from '@/pages/scout-page';
@@ -31,7 +31,7 @@ function Router() {
     <AtlasShell>
       <RoutedErrorBoundary>
         <Switch>
-          <Route path="/" component={DashboardPage} />
+          <Route path="/" component={CommandCenterPage} />
           <Route path="/employees" component={EmployeesPage} />
           <Route path="/crm" component={CrmPage} />
           <Route path="/mission-queue" component={MissionQueuePage} />
