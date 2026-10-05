@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 
 const nav = [
-  { href: '/', label: 'Mission Control', icon: LayoutDashboard },
+  { href: '/', label: 'Command Center', icon: LayoutDashboard },
   { href: '/employees', label: 'AI Employees', icon: Bot },
   { href: '/mission-queue', label: 'Mission Queue', icon: ListTodo },
   { href: '/crm', label: 'CRM Pipeline', icon: Users },
@@ -23,6 +23,7 @@ export function AtlasShell({ children }: { children: ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const current = nav.find((item) => item.href === location);
+  const isCommandCenter = location === '/';
 
   return (
     <div className="noise min-h-[100dvh] bg-[#07111f] text-[#e7edf4]">
@@ -52,10 +53,10 @@ export function AtlasShell({ children }: { children: ReactNode }) {
               const Icon = item.icon;
               const active = item.href === location;
               return (
-                <Link key={item.href} href={item.href} onClick={() => setMobileOpen(false)} className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[12px] font-medium transition-colors focus-ring ${active ? 'bg-[#d4af37] text-[#0b1f3a] shadow-[0_5px_16px_rgba(212,175,55,.14)]' : 'text-[#95a5b8] hover:bg-white/[.06] hover:text-white'} ${collapsed ? 'lg:justify-center lg:px-2' : ''}`} data-testid={`link-nav-${item.label.toLowerCase().replaceAll(' ', '-')}`}>
+                <Link key={item.href} href={item.href} onClick={() => setMobileOpen(false)} className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[12px] font-medium transition-colors focus-ring ${active ? 'bg-[#d4af37] text-[#0b1f3a] shadow-[0_5px_16px_rgba(212,175,55,.14)]' : 'text-[#95a5b8] hover:bg-white/[.06] hover:text-white'} ${collapsed ? 'lg:justify-center lg:px-2' : ''}`} data-testid={item.href === '/' ? 'link-nav-mission-control' : `link-nav-${item.label.toLowerCase().replaceAll(' ', '-')}`}>
                   <Icon size={17} strokeWidth={active ? 2.4 : 1.8} />
                   <span className={collapsed ? 'lg:hidden' : ''}>{item.label}</span>
-                  {item.href === '/employees' && <span className={`ml-auto h-1.5 w-1.5 rounded-full bg-[#16a085] ${collapsed ? 'lg:hidden' : ''}`} />}
+                  {!isCommandCenter && item.href === '/employees' && <span className={`ml-auto h-1.5 w-1.5 rounded-full bg-[#16a085] ${collapsed ? 'lg:hidden' : ''}`} />}
                 </Link>
               );
             })}
@@ -78,12 +79,12 @@ export function AtlasShell({ children }: { children: ReactNode }) {
             <button className="rounded-lg border border-[#2a3c54] p-2 text-[#a6b5c6] hover:border-[#d4af37] hover:text-[#d4af37] lg:hidden" onClick={() => setMobileOpen(true)} data-testid="button-open-sidebar" aria-label="Open navigation"><Menu size={18} /></button>
             <div><p className="font-mono text-[9px] uppercase tracking-[.2em] text-[#71839b]">Atlas / {current?.label ?? 'Workspace'}</p><h1 className="mt-1 font-display text-[17px] font-semibold tracking-[-.035em] text-white sm:text-[19px]">{current?.label ?? 'Workspace'}</h1></div>
           </div>
-          <div className="flex items-center gap-2 sm:gap-4">
+          {isCommandCenter ? <a href="#attention" className="focus-ring rounded-lg border border-[#25364d] px-3 py-2 font-mono text-[10px] text-[#d4af37]">Attention signal</a> : <div className="flex items-center gap-2 sm:gap-4">
             <div className="hidden items-center gap-2 rounded-lg border border-[#25364d] bg-[#0c1a2d] px-3 py-2 sm:flex"><Search size={15} className="text-[#6e829a]" /><span className="font-mono text-[10px] text-[#6e829a]">Search command</span><kbd className="ml-6 rounded border border-[#33465d] px-1.5 py-0.5 font-mono text-[9px] text-[#7f91a7]">⌘K</kbd></div>
             <button className="relative rounded-lg border border-[#25364d] p-2 text-[#94a5b9] hover:border-[#d4af37] hover:text-[#d4af37]" data-testid="button-notifications" aria-label="Notifications"><Bell size={17} /><span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-[#d4af37]" /></button>
             <div className="hidden h-7 w-px bg-[#233247] sm:block" />
             <div className="hidden items-center gap-2 sm:flex"><span className="h-2 w-2 rounded-full bg-[#16a085] pulse-dot" /><span className="font-mono text-[9px] uppercase tracking-wider text-[#7f91a7]">All systems nominal</span></div>
-          </div>
+          </div>}
         </header>
         <main className="app-grid min-h-[calc(100dvh-74px)] px-4 py-6 sm:px-7 lg:px-9">{children}</main>
       </div>
