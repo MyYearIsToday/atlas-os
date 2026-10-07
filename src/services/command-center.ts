@@ -59,8 +59,21 @@ export async function loadCommandSignals(base: string): Promise<CommandSignals> 
   return { health, pipeline, workforce, autonomy, finance, decisions: decisions.data?.items.length === 0 ? { ...decisions, state: 'EMPTY' } : decisions, missions };
 }
 export const missionStates = ['Pending', 'Waiting Approval', 'In Progress', 'Completed', 'Failed', 'Blocked'] as const;
+/**
+ * The backend keeps an approval-required mission at status "Pending" (the runner refuses it until a human approves),
+ * so "awaiting approval" is decided by the approval requirement as well as the status. Contract values only.
+ */
+export function isAwaitingApproval(m: Mission): boolean {
+  return (m.approvalRequired === 'Approval Required' || m.approvalRequired === 'CEO Only') && (m.status === 'Pending' || m.status === 'Waiting Approval');
+}
+/** Missions that need a human or have gone wrong. */
+export function attentionMissions(missions: Mission[]): Mission[] {
+  return missions.filter((m) => isAwaitingApproval(m) || ['Waiting Approval', 'Failed', 'Blocked'].includes(m.status));
+}
+/** Each mission is counted exactly once; an awaiting-approval mission is not also counted as plain Pending. */
 export function missionCounts(missions: Mission[]) {
-  return Object.fromEntries(missionStates.map((state) => [state, missions.filter((m) => m.status === state).length])) as Record<typeof missionStates[number], number>;
+  const category = (m: Mission) => (isAwaitingApproval(m) ? 'Waiting Approval' : m.status);
+  return Object.fromEntries(missionStates.map((state) => [state, missions.filter((m) => category(m) === state).length])) as Record<typeof missionStates[number], number>;
 }
 export function executionState(s: CommandSignals): string {
   if (s.pipeline.data) return s.pipeline.data.missionExecutionEnabled ? 'AVAILABLE' : 'DISABLED';
