@@ -10,8 +10,7 @@
     "types": ["node"],
     "noEmit": true,
     "lib": ["ES2022", "DOM"],
-    "baseUrl": "..",
-    "paths": { "@/*": ["src/*"] },
+    "paths": { "@/*": ["../src/*"] },
     "ignoreDeprecations": "6.0"
   },
   "include": ["**/*"]

@@ -7,8 +7,18 @@ export interface CollectorOutcome {
   /** COLLECTED: the source was read (possibly with no usable fields). UNAVAILABLE: nothing to read or nothing usable was served. FAILED: policy block or technical failure. */
   status: "COLLECTED" | "UNAVAILABLE" | "FAILED";
   records: EvidenceRecord[];
+  /** Transient, policy-checked media inputs. These are never evidence records and must not be persisted. */
+  media?: CollectedMedia[];
   failure?: { code: string; message: string };
   hops?: string[];
+}
+
+export interface CollectedMedia {
+  sourceType: "image";
+  sourceReference: string;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  dataUrl: string;
+  label?: string;
 }
 
 export interface EvidenceCollector {

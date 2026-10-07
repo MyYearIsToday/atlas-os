@@ -1,5 +1,5 @@
 import { Link } from 'wouter';
-import { ArrowUpRight, CircleDollarSign, Activity } from 'lucide-react';
+import { ArrowUpRight, CircleDollarSign, Activity, Image as ImageIcon } from 'lucide-react';
 import { type CommandSignals, missionCounts } from '@/services/command-center';
 import { Panel, DataState, StateBadge } from './operating-panels';
 
@@ -22,6 +22,23 @@ export function RevenueSignal({ signals: s }: { signals: CommandSignals }) {
   const totals = f ? Object.entries(f.receivedRevenue.totals) : [];
   const pending = f?.notRevenue.PAYMENT_PENDING?.count;
   return <Panel id="revenue" title="Revenue signal" href="/finance"><div className="cc-panel-title"><CircleDollarSign size={24} aria-hidden="true" /><div><h3>Recorded payments only</h3><p>Invoices are operational records, not revenue.</p></div></div>{f ? <><StateBadge state={f.receivedRevenue.paymentCount === 0 ? 'EMPTY' : 'RECORDED'} />{totals.length ? <dl className="cc-revenue-totals">{totals.map(([currency, amount]) => <div key={currency}><dt>{currency}</dt><dd>{amount}</dd></div>)}</dl> : <div className="cc-empty-inline">{f.receivedRevenue.paymentCount === 0 ? 'No payments recorded. No currency total is assumed.' : 'Payment count exists, but currency totals are not available.'}</div>}<div className="cc-scout-field"><span>Payments recorded</span><strong>{f.receivedRevenue.paymentCount}</strong></div>{pending !== undefined && <div className="cc-scout-field"><span>Invoices awaiting payment · not revenue</span><strong>{pending}</strong></div>}{pending !== undefined && pending > 0 && <p className="cc-footnote">Payment follow-up is required outside this read-only surface. Atlas does not move money.</p>}</> : <DataState state={s.finance.state} />}<p className="cc-footnote">All-time recorded totals, per currency. No conversions, invoice-value estimates, or projected revenue.</p></Panel>;
+}
+export function VisualIntelligenceSignal({ signals: s }: { signals: CommandSignals }) {
+  const pipeline = s.pipeline.data;
+  const multimodal = pipeline?.multimodal;
+  return <Panel id="visual-intelligence" title="Visual intelligence">
+    <div className="cc-panel-title"><ImageIcon size={23} aria-hidden="true" /><div><h3>Business media observations</h3><p>Image findings from eligible public business websites.</p></div>{multimodal && <StateBadge state={multimodal.enabled ? 'ENABLED' : 'DISABLED'} />}</div>
+    {multimodal ? <>
+      <div className="cc-scout-field"><span>Image sources with observations</span><strong>{multimodal.imageSourcesWithObservations}</strong></div>
+      <div className="cc-scout-field"><span>Recorded visual observations</span><strong>{pipeline.counts.multimodalObservations}</strong></div>
+      {multimodal.observations.length ? <ul className="cc-role-list">{multimodal.observations.slice(0, 8).map((item) => <li key={item.observationId}>
+        <strong>{item.businessName}</strong><span>{item.observation}</span><small>{item.category.replaceAll('_', ' ')} · {item.confidence.toLowerCase()} confidence</small>
+        <StateBadge state={item.verificationStatus} />
+        <small><a href={item.sourceReference} target="_blank" rel="noreferrer">Open source</a> · opportunity score: {item.opportunityScore === null ? 'not available' : item.opportunityScore}</small>
+      </li>)}</ul> : <div className="cc-empty-inline">{multimodal.enabled ? 'No visual observations have been recorded.' : 'Image analysis is disabled; existing text research continues normally.'}</div>}
+      <p className="cc-footnote">Enabled reflects configuration, not a completed model call. Every finding remains UNVERIFIED and is excluded from evidence and scoring. Atlas does not currently analyze video, audio, or PDFs.</p>
+    </> : <DataState state={s.pipeline.state} />}
+  </Panel>;
 }
 export function RecentActivity({ signals: s }: { signals: CommandSignals }) {
   const items = s.decisions.data?.items;

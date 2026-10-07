@@ -8,7 +8,7 @@
  */
 
 export type Collection =
-  | "business" | "external_key" | "evidence" | "observations" | "score" | "audit"
+  | "business" | "external_key" | "evidence" | "observations" | "multimodal_observations" | "score" | "audit"
   | "mission" | "mission_output" | "ledger" | "trace" | "started"
   | "prospect" | "engagement" | "decision" | "invoice" | "approval" | "cycle" | "decision_exec" | "autonomy_state";
 

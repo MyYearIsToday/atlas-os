@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "server:start": "tsx server/ai-proxy-server.ts",
     "server:typecheck": "tsc -p server/tsconfig.server.json",
+    "test:multimodal": "tsx --test src/services/multimodal-intelligence/service.test.ts src/services/evidence/website-collector.multimodal.test.ts src/orchestrator/multimodal-pipeline.test.ts server/workforce/workforce.test.ts server/workforce/integration.test.ts",
     "test:web-intelligence": "tsx --test src/services/web-intelligence/tavily-web-discovery.test.ts server/web-intelligence-route.test.ts",
     "smoke:phase1": "tsx scripts/smoke-test-phase1.ts"
   },
@@ -56,6 +57,7 @@
     "@types/pg": "^8.23.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "typescript": "^6.0.3",
     "@vitejs/plugin-react": "5.2.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",

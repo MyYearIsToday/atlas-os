@@ -5,7 +5,18 @@ export interface Signal<T> { state: SignalState; data?: T; checkedAt?: string }
 const count = z.number().int().nonnegative();
 export const missionSchema = z.object({ taskId: z.string(), title: z.string(), status: z.string(), approvalRequired: z.string(), createdAt: z.string().optional(), lastFailureReason: z.string().nullable().optional() });
 export type Mission = z.infer<typeof missionSchema>;
-export const pipelineSchema = z.object({ missionExecutionEnabled: z.boolean(), durable: z.boolean(), counts: z.object({ businesses: count, scores: count, scoresWithheld: count, audits: count, missions: count }), missions: z.array(missionSchema) });
+export const multimodalObservationSchema = z.object({
+  observationId: z.string(), businessId: z.string(), businessName: z.string(), observation: z.string(), category: z.string(),
+  sourceType: z.enum(['image', 'video', 'audio', 'document', 'web']), confidence: z.enum(['VERIFIED', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']),
+  verificationStatus: z.enum(['UNVERIFIED', 'HUMAN_VERIFIED', 'REJECTED']), sourceReference: z.string(), createdAt: z.string(),
+  opportunityScore: z.number().nullable(),
+});
+export const pipelineSchema = z.object({
+  missionExecutionEnabled: z.boolean(), durable: z.boolean(),
+  counts: z.object({ businesses: count, scores: count, scoresWithheld: count, audits: count, missions: count, multimodalObservations: count }),
+  multimodal: z.object({ enabled: z.boolean(), imageSourcesWithObservations: count, observations: z.array(multimodalObservationSchema) }),
+  missions: z.array(missionSchema),
+});
 export const healthSchema = z.object({ providers: z.array(z.object({ provider: z.string(), healthy: z.boolean(), checkedAt: z.string().optional() })), scoutDiscovery: z.object({ enabled: z.boolean() }) });
 export const workforceSchema = z.object({ catalogStatus: z.enum(['ok', 'pending', 'unavailable']), catalogModels: count, employees: z.array(z.object({ employee: z.string(), enabled: z.boolean(), source: z.string(), providerId: z.string(), model: z.string().nullable(), fallback: z.string().nullable() })) });
 export const autonomySchema = z.object({ autonomy: z.object({ enabled: z.boolean(), schedulerStarted: z.boolean(), cycleRunning: z.boolean(), missionExecutionEnabled: z.boolean() }), counts: z.object({ businesses: count, decisions: count, cycles: count, prospects: count, engagements: count, invoices: count, approvals: count }) });

@@ -51,6 +51,7 @@ export function registerRealHandlers(registry: HandlerRegistry, config: Orchestr
       const evidence = buildProvenanceEvidence(business);
       store.evidence.set(business.id, evidence);
       let observations: EvidenceRecord[] = [];
+      const multimodalObservations = [...(store.multimodalObservations.get(business.id) ?? [])];
       if (pipeline.collectors?.length) {
         // Real evidence acquisition. Collectors never throw; a failed source is a trace entry, never evidence.
         const acquired = await acquireEvidence(business, pipeline.collectors);
@@ -58,8 +59,20 @@ export function registerRealHandlers(registry: HandlerRegistry, config: Orchestr
         store.observations.set(business.id, observations);
         for (const outcome of acquired.outcomes) {
           store.record({ stage: "evidence", event: "BusinessDiscovered", businessId: business.id, handler: `collector:${outcome.source}`, state: `${outcome.status}, ${outcome.records.length} record(s)${outcome.failure ? ` [${outcome.failure.code}]` : ""}`, ...(outcome.status === "FAILED" && outcome.failure ? { error: outcome.failure.message } : {}) });
+          if (pipeline.multimodalIntelligence && outcome.media?.length) {
+            let imageCount = 0;
+            for (const media of outcome.media) {
+              const result = await pipeline.multimodalIntelligence.analyze({ businessId: business.id, ...media });
+              if (result.status === "ANALYZED") {
+                imageCount++;
+                multimodalObservations.push(...result.observations);
+              }
+            }
+            store.record({ stage: "evidence", event: "BusinessDiscovered", businessId: business.id, handler: "multimodal-intelligence", state: `${imageCount} image(s) analyzed; ${multimodalObservations.length} unverified observation(s)` });
+          }
         }
       }
+      if (multimodalObservations.length) store.multimodalObservations.set(business.id, multimodalObservations);
       store.record({ ...base, state: `${evidence.length} provenance + ${observations.length} observed evidence items recorded`, nextEvent: "EvidenceUpdated" });
       return {
         output: { needsReview, pipeline: "started", evidenceItems: evidence.length },
@@ -93,7 +106,7 @@ export function registerRealHandlers(registry: HandlerRegistry, config: Orchestr
         // The handler's confidence is in its own determination. "Evidence is insufficient, so the score is
         // withheld" is certain; the score's low evidence confidence stays visible inside the output.
         confidence: outcome.scorable ? outcome.score.confidence.numeric : 1,
-        nextEvent: { type: "ScoreCalculated", payload: { businessId: business.id, opportunityScore: outcome.score, auditInput: buildAuditInput(business, store.evidence.get(business.id) ?? [], outcome, store.observations.get(business.id) ?? []) } },
+        nextEvent: { type: "ScoreCalculated", payload: { businessId: business.id, opportunityScore: outcome.score, auditInput: buildAuditInput(business, store.evidence.get(business.id) ?? [], outcome, store.observations.get(business.id) ?? [], store.multimodalObservations.get(business.id) ?? []) } },
       };
     }
     // Cannot honestly chain to ScoreCalculated: that event also requires a
