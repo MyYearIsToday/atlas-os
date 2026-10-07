@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "server:start": "tsx server/ai-proxy-server.ts",
     "server:typecheck": "tsc -p server/tsconfig.server.json",
+    "test:web-intelligence": "tsx --test src/services/web-intelligence/tavily-web-discovery.test.ts server/web-intelligence-route.test.ts",
     "smoke:phase1": "tsx scripts/smoke-test-phase1.ts"
   },
   "dependencies": {

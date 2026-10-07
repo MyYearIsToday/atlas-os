@@ -29,6 +29,8 @@ import { AutonomousWorkforce } from "../src/orchestrator/autonomous-workforce";
 import { ProviderRegistry } from "../src/workforce/provider-registry";
 import { OperationalLedger } from "../src/services/finance/ledger";
 import { submitManualBusiness, type ManualBusinessInput } from "../src/services/scout/manual-entry";
+import { TavilyWebDiscoveryProvider } from "../src/services/web-intelligence/tavily-web-discovery-provider";
+import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/web-intelligence/provider";
 
 let scoutDiscoveryEnabled = false;
 /** The scheduler's own repository + orchestrator, shared with manual entry so both feed one pipeline. */
@@ -175,7 +177,10 @@ function isAuthorized(req: IncomingMessage): boolean {
   return req.headers["x-atlas-proxy-secret"] === expected;
 }
 
-export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = buildProviders()) {
+export function createAiProxyServer(
+  providers: Record<ProviderId, AIProvider> = buildProviders(),
+  webDiscoveryProvider: WebDiscoveryProvider = new TavilyWebDiscoveryProvider(),
+) {
   if (!process.env.ATLAS_PROXY_SHARED_SECRET) {
     console.warn("[atlas-proxy] ATLAS_PROXY_SHARED_SECRET is not set — this endpoint accepts unauthenticated requests. Set it before deploying to Render.");
   }
@@ -206,6 +211,65 @@ export function createAiProxyServer(providers: Record<ProviderId, AIProvider> = 
       if (!isAuthorized(req)) {
         sendJson(res, 401, { failed: true, code: "PROVIDER_UNAVAILABLE", reason: "Unauthorized" });
         logRequest(method, url, 401, Date.now() - started);
+        return;
+      }
+
+      if (method === "POST" && url === "/api/web-intelligence/search") {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            sendJson(res, 400, { failed: true, code: "INVALID_RESPONSE", reason: "Malformed JSON request body" });
+            logRequest(method, url, 400, Date.now() - started);
+            return;
+          }
+          throw error;
+        }
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          sendJson(res, 400, { failed: true, code: "INVALID_RESPONSE", reason: "A query is required" });
+          logRequest(method, url, 400, Date.now() - started);
+          return;
+        }
+
+        const input = body as Record<string, unknown>;
+        if (Object.keys(input).some((key) => key !== "query" && key !== "maxResults")) {
+          sendJson(res, 400, { failed: true, code: "INVALID_RESPONSE", reason: "Only query and maxResults are accepted" });
+          logRequest(method, url, 400, Date.now() - started);
+          return;
+        }
+        const query = typeof input.query === "string" ? input.query.trim() : "";
+        if (!query || query.length > 500) {
+          sendJson(res, 400, { failed: true, code: "INVALID_RESPONSE", reason: "query must contain 1–500 characters" });
+          logRequest(method, url, 400, Date.now() - started);
+          return;
+        }
+        if (input.maxResults !== undefined && (!Number.isInteger(input.maxResults) || (input.maxResults as number) < 1)) {
+          sendJson(res, 400, { failed: true, code: "INVALID_RESPONSE", reason: "maxResults must be a positive integer" });
+          logRequest(method, url, 400, Date.now() - started);
+          return;
+        }
+        const maxResults = Math.min(typeof input.maxResults === "number" ? input.maxResults : 5, 10);
+
+        try {
+          const sources = await webDiscoveryProvider.discover({ query, maxResults });
+          sendJson(res, 200, {
+            provider: "tavily",
+            discoveryStatus: "DISCOVERED",
+            verificationStatus: "UNVERIFIED",
+            sources,
+          });
+          logRequest(method, url, 200, Date.now() - started);
+        } catch (error) {
+          const code = error instanceof WebDiscoveryError ? error.code : "upstream_http_error";
+          const status = code === "invalid_query" ? 400
+            : code === "api_key_missing" ? 503
+              : code === "rate_limited" ? 429
+                : code === "timeout" ? 504 : 502;
+          const reason = error instanceof WebDiscoveryError ? error.message : "Tavily request failed";
+          sendJson(res, status, { failed: true, code: `WEB_DISCOVERY_${code.toUpperCase()}`, reason });
+          logRequest(method, url, status, Date.now() - started);
+        }
         return;
       }
 
