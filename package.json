@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "server:start": "tsx server/ai-proxy-server.ts",
     "server:typecheck": "tsc -p server/tsconfig.server.json",
-    "test:multimodal": "tsx --test src/services/multimodal-intelligence/service.test.ts src/services/evidence/website-collector.multimodal.test.ts src/orchestrator/multimodal-pipeline.test.ts server/workforce/workforce.test.ts server/workforce/integration.test.ts",
+    "test:multimodal": "tsx --test src/services/multimodal-intelligence/service.test.ts src/services/evidence/website-collector.multimodal.test.ts src/orchestrator/multimodal-pipeline.test.ts src/orchestrator/multimodal-integration.test.ts server/workforce/workforce.test.ts server/workforce/integration.test.ts",
     "test:web-intelligence": "tsx --test src/services/web-intelligence/tavily-web-discovery.test.ts server/web-intelligence-route.test.ts",
     "smoke:phase1": "tsx scripts/smoke-test-phase1.ts"
   },
