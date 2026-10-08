@@ -1,6 +1,6 @@
 export type AuditStatus="DRAFT"|"READY"|"APPROVAL_REQUIRED"|"APPROVED"|"DELIVERED"|"FAILED";
 export type ApprovalStatus="NOT_REQUIRED"|"PENDING"|"APPROVED"|"REJECTED";
-export type AuditSectionKey="executive_summary"|"business_profile"|"visibility"|"competitors"|"opportunity"|"key_gaps"|"quick_wins"|"recommendations"|"measurement"|"limitations";
+export type AuditSectionKey="executive_summary"|"business_profile"|"visibility"|"visual_intelligence"|"competitors"|"opportunity"|"key_gaps"|"quick_wins"|"recommendations"|"measurement"|"limitations";
 export interface AuditEvidenceRef { evidenceId:string; sourceRef?:string; observedAt?:string; confidence:string; observability:string; }
 export interface AuditFinding { findingId:string; type:string; priority:string; title:string; description:string; evidenceRefs:AuditEvidenceRef[]; sourceRefs:string[]; confidence:string; observability:string; relatedScore?:string; relatedDimension?:string; recommendedAction?:string; }
 export interface AuditRecommendation { recommendationId:string; action:string; reason:string; evidenceRefs:AuditEvidenceRef[]; relatedScoreComponent?:string; confidence:string; estimatedEffort:string; approvalLevel:string; missionType?:string; status:"OPEN"|"APPROVED"|"COMPLETED"|"DISMISSED"; }

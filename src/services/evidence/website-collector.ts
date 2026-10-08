@@ -5,7 +5,7 @@ import https from "node:https";
 import net from "node:net";
 import type { BusinessIntelligence } from "./business-intelligence";
 import type { EvidenceRecord } from "./evidence";
-import type { CollectorOutcome, EvidenceCollector } from "./acquisition";
+import type { CollectedMedia, CollectorOutcome, EvidenceCollector } from "./acquisition";
 
 /**
  * Website evidence collector. It fetches ONLY the business's own public website and records what it
@@ -17,8 +17,8 @@ import type { CollectorOutcome, EvidenceCollector } from "./acquisition";
 
 export interface ResolvedAddress { address: string; family: 4 | 6 }
 export type ResolveFn = (hostname: string) => Promise<ResolvedAddress[]>;
-export interface HttpResponseLite { status: number; headers: Record<string, string>; body: string; truncated: boolean }
-export type RequestFn = (target: { url: URL; address: string; family: 4 | 6 }, opts: { timeoutMs: number; maxBytes: number }) => Promise<HttpResponseLite>;
+export interface HttpResponseLite { status: number; headers: Record<string, string>; body: string; binaryBody?: Uint8Array; truncated: boolean }
+export type RequestFn = (target: { url: URL; address: string; family: 4 | 6 }, opts: { timeoutMs: number; maxBytes: number; acceptedContentTypes?: readonly string[] }) => Promise<HttpResponseLite>;
 
 // ---------- address / URL policy ----------
 function v4Reason(b: number[]): string | null {
@@ -118,7 +118,7 @@ const USER_AGENT = "AtlasOS-PublicEvidence/1.0";
 const connectErrors = new Set(["ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "ECONNRESET", "EAI_AGAIN"]);
 
 /** Connects to the already-validated address (the lookup hook returns it; DNS is never consulted again). */
-export const defaultRequest: RequestFn = (target, { timeoutMs, maxBytes }) =>
+export const defaultRequest: RequestFn = (target, { timeoutMs, maxBytes, acceptedContentTypes = ["text/html", "text/plain"] }) =>
   new Promise((resolve, reject) => {
     const secure = target.url.protocol === "https:";
     const hostname = target.url.hostname.replace(/^\[|\]$/g, "");
@@ -132,7 +132,7 @@ export const defaultRequest: RequestFn = (target, { timeoutMs, maxBytes }) =>
       method: "GET",
       agent: false,
       servername: secure && net.isIP(hostname) === 0 ? hostname : undefined,
-      headers: { Host: target.url.host, "User-Agent": USER_AGENT, Accept: "text/html,text/plain;q=0.9", "Accept-Encoding": "identity" },
+      headers: { Host: target.url.host, "User-Agent": USER_AGENT, Accept: acceptedContentTypes.length === 2 && acceptedContentTypes.includes("text/html") && acceptedContentTypes.includes("text/plain") ? "text/html,text/plain;q=0.9" : acceptedContentTypes.join(","), "Accept-Encoding": "identity" },
       lookup: ((_h: string, options: { all?: boolean }, cb: (...a: unknown[]) => void) =>
         options?.all ? cb(null, [{ address: target.address, family: target.family }]) : cb(null, target.address, target.family)) as never,
     }, (res) => {
@@ -141,7 +141,12 @@ export const defaultRequest: RequestFn = (target, { timeoutMs, maxBytes }) =>
       const type = (headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
       const status = res.statusCode ?? 0;
       if (status >= 300 && status < 400) { res.resume(); return done(() => resolve({ status, headers, body: "", truncated: false })); }
-      if (type !== "text/html" && type !== "text/plain") { res.destroy(); return done(() => resolve({ status, headers, body: "", truncated: false })); }
+      if (!acceptedContentTypes.includes(type)) { res.destroy(); return done(() => resolve({ status, headers, body: "", truncated: false })); }
+      const isText = type === "text/html" || type === "text/plain";
+      const bodyResult = (truncated: boolean): HttpResponseLite => {
+        const bytes = Buffer.concat(chunks);
+        return { status, headers, body: isText ? bytes.toString("utf8") : "", ...(isText ? {} : { binaryBody: bytes }), truncated };
+      };
       const chunks: Buffer[] = [];
       let size = 0;
       res.on("data", (chunk: Buffer) => {
@@ -149,14 +154,14 @@ export const defaultRequest: RequestFn = (target, { timeoutMs, maxBytes }) =>
         if (size > maxBytes) {
           chunks.push(chunk.subarray(0, chunk.length - (size - maxBytes)));
           res.destroy();
-          return done(() => resolve({ status, headers, body: Buffer.concat(chunks).toString("utf8"), truncated: true }));
+          return done(() => resolve(bodyResult(true)));
         }
         chunks.push(chunk);
       });
-      res.on("end", () => done(() => resolve({ status, headers, body: Buffer.concat(chunks).toString("utf8"), truncated: false })));
+      res.on("end", () => done(() => resolve(bodyResult(false))));
       res.on("error", (e) => done(() => reject(e)));
       // A connection that closes before the body is complete must not look like a full page (it would yield false "absent" findings).
-      res.on("close", () => done(() => (res.complete ? resolve({ status, headers, body: Buffer.concat(chunks).toString("utf8"), truncated: size > maxBytes }) : reject(Object.assign(new Error("response_aborted"), { code: "ECONNRESET" })))));
+      res.on("close", () => done(() => (res.complete ? resolve(bodyResult(size > maxBytes)) : reject(Object.assign(new Error("response_aborted"), { code: "ECONNRESET" })))));
     });
     const timer = setTimeout(() => { req.destroy(new Error("request_timeout")); done(() => reject(Object.assign(new Error("request_timeout"), { code: "ETIMEDOUT" }))); }, timeoutMs);
     req.on("error", (e) => done(() => reject(e)));
@@ -176,6 +181,33 @@ function attrs(tag: string): Record<string, string> {
 }
 const tagsOf = (html: string, name: string) => html.match(new RegExp(`<${name}\\b(?:"[^"]*"|'[^']*'|[^'">])*>`, "gi")) ?? [];
 const SOCIAL = ["facebook.com", "instagram.com", "x.com", "twitter.com", "linkedin.com", "tiktok.com", "youtube.com"];
+const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
+const RELEVANT_IMAGE_HINT = /\b(logo|brand|storefront|store|shop|business|menu|flyer|poster|banner|offer|promo(?:tion)?|product|service|gallery|hero|interior|exterior|sign|food|drink|photo)\b/i;
+const SENSITIVE_QUERY_KEY = /(token|auth|key|secret|signature|(^|_)sig(nature)?($|_)|password|credential)/i;
+
+interface ImageCandidate { url: string; label: string; score: number; order: number }
+function relevantImageCandidates(html: string, pageUrl: URL): ImageCandidate[] {
+  const candidates: ImageCandidate[] = [];
+  for (const [order, tag] of tagsOf(html, "img").entries()) {
+    const a = attrs(tag);
+    const src = (a.src || a["data-src"] || "").trim();
+    if (!src || src.length > 2048 || /^(data:|blob:|javascript:)/i.test(src)) continue;
+    const hint = decode([a.alt, a.title, a.class, a.id, src].filter(Boolean).join(" "));
+    if (!RELEVANT_IMAGE_HINT.test(hint)) continue;
+    const width = Number.parseInt(a.width ?? "", 10);
+    const height = Number.parseInt(a.height ?? "", 10);
+    if ((Number.isFinite(width) && width > 0 && width < 64) || (Number.isFinite(height) && height > 0 && height < 64)) continue;
+    try {
+      const url = new URL(src, pageUrl);
+      if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) continue;
+      url.hash = "";
+      if ([...url.searchParams.keys()].some((key) => SENSITIVE_QUERY_KEY.test(key))) continue;
+      const score = (hint.match(new RegExp(RELEVANT_IMAGE_HINT.source, "gi")) ?? []).length;
+      candidates.push({ url: url.toString(), label: hint.slice(0, 180), score, order });
+    } catch { /* malformed media references are ignored */ }
+  }
+  return [...new Map(candidates.sort((a, b) => b.score - a.score || a.order - b.order).map((candidate) => [candidate.url, candidate])).values()];
+}
 
 /** Limits fixed by the Objective 1A contract. Callers may tighten them but never exceed the maximums. */
 export const LIMITS = { maxRedirects: 4, defaultTimeoutMs: 8000, maxTimeoutMs: 30000, defaultMaxBytes: 1024 * 1024, maxMaxBytes: 2 * 1024 * 1024, pageTextMaxChars: 2000 } as const;
@@ -231,6 +263,7 @@ export function analyzeHtml(html: string): HtmlFacts {
 export interface WebsiteCollectorOptions {
   resolve?: ResolveFn; request?: RequestFn; nowIso?: () => string;
   perRequestTimeoutMs?: number; overallDeadlineMs?: number; maxRedirects?: number; maxBytes?: number; maxAddresses?: number;
+  collectImages?: boolean; maxMediaImages?: number; maxImageBytes?: number;
 }
 
 class CollectionFailure extends Error { constructor(public code: string, message: string) { super(message); } }
@@ -244,6 +277,8 @@ export class WebsiteEvidenceCollector implements EvidenceCollector {
       nowIso: options.nowIso ?? (() => new Date().toISOString()),
       perRequestTimeoutMs: bounded(options.perRequestTimeoutMs, LIMITS.defaultTimeoutMs, LIMITS.maxTimeoutMs), overallDeadlineMs: options.overallDeadlineMs ?? 20000,
       maxRedirects: Math.min(Math.max(Math.trunc(options.maxRedirects ?? LIMITS.maxRedirects), 0), LIMITS.maxRedirects), maxBytes: bounded(options.maxBytes, LIMITS.defaultMaxBytes, LIMITS.maxMaxBytes), maxAddresses: options.maxAddresses ?? 4,
+      collectImages: options.collectImages ?? false, maxMediaImages: Math.min(Math.max(Math.trunc(options.maxMediaImages ?? 3), 0), 3),
+      maxImageBytes: bounded(options.maxImageBytes, 128 * 1024, 128 * 1024),
     };
   }
 
@@ -261,7 +296,10 @@ export class WebsiteEvidenceCollector implements EvidenceCollector {
       if (response.status >= 300) return unavailable("redirect_without_location", "the website redirected without a usable Location");
       if (type !== "text/html" && type !== "text/plain") return unavailable("unsupported_content_type", `content type "${type || "unknown"}" is not text/html or text/plain`);
       // Request succeeded: COLLECTED even when nothing extractable was found (empty evidence, never fabricated).
-      return { source: this.source, status: "COLLECTED", records: this.toRecords(business, fetched, type), hops: fetched.hops };
+      const media = this.o.collectImages && type === "text/html" && !response.truncated
+        ? await this.collectImagesForPage(response.body, fetched.finalUrl, started)
+        : [];
+      return { source: this.source, status: "COLLECTED", records: this.toRecords(business, fetched, type), ...(media.length ? { media } : {}), hops: fetched.hops };
     } catch (e) {
       const failure = e instanceof CollectionFailure ? { code: e.code, message: e.message } : { code: "fetch_failed", message: e instanceof Error ? e.message : "unknown error" };
       return { source: this.source, status: "FAILED", records: [], failure };
@@ -270,7 +308,7 @@ export class WebsiteEvidenceCollector implements EvidenceCollector {
     }
   }
 
-  private async fetchPage(rawWebsite: string, started: number) {
+  private async fetchPage(rawWebsite: string, started: number, acceptedContentTypes: readonly string[] = ["text/html", "text/plain"], maxBytes = this.o.maxBytes) {
     let current = /^[a-z][a-z0-9+.-]*:/i.test(rawWebsite.trim()) ? rawWebsite.trim() : `https://${rawWebsite.trim()}`;
     const hops: string[] = [];
     for (let hop = 0; hop <= this.o.maxRedirects; hop++) {
@@ -292,7 +330,7 @@ export class WebsiteEvidenceCollector implements EvidenceCollector {
         const remaining = this.o.overallDeadlineMs - (Date.now() - started);
         if (remaining <= 0) throw new CollectionFailure("deadline_exceeded", "overall collection deadline exceeded");
         try {
-          response = await this.o.request({ url: check.url, address: target.address, family: target.family }, { timeoutMs: Math.min(this.o.perRequestTimeoutMs, remaining), maxBytes: this.o.maxBytes });
+          response = await this.o.request({ url: check.url, address: target.address, family: target.family }, { timeoutMs: Math.min(this.o.perRequestTimeoutMs, remaining), maxBytes, acceptedContentTypes });
           break;
         } catch (e) { lastError = e; }
       }
@@ -309,6 +347,29 @@ export class WebsiteEvidenceCollector implements EvidenceCollector {
       return { response, finalUrl: check.url, hops };
     }
     throw new CollectionFailure("too_many_redirects", "redirect limit exceeded");
+  }
+
+  private async collectImagesForPage(html: string, pageUrl: URL, started: number): Promise<CollectedMedia[]> {
+    const selected = relevantImageCandidates(html, pageUrl).slice(0, this.o.maxMediaImages);
+    const media: CollectedMedia[] = [];
+    for (const candidate of selected) {
+      try {
+        const fetched = await this.fetchPage(candidate.url, started, IMAGE_TYPES, this.o.maxImageBytes);
+        const response = fetched.response;
+        const mimeType = (response.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+        if (response.status < 200 || response.status >= 300 || response.truncated || !IMAGE_TYPES.includes(mimeType as (typeof IMAGE_TYPES)[number]) || !response.binaryBody?.byteLength) continue;
+        media.push({
+          sourceType: "image",
+          sourceReference: fetched.finalUrl.toString(),
+          mimeType: mimeType as CollectedMedia["mimeType"],
+          dataUrl: `data:${mimeType};base64,${Buffer.from(response.binaryBody).toString("base64")}`,
+          label: candidate.label || undefined,
+        });
+      } catch {
+        // Each candidate is optional. A blocked, missing, or unsupported image never becomes evidence.
+      }
+    }
+    return media;
   }
 
   /** Conservative public-page evidence: only extracted fields, MEDIUM confidence, UNVERIFIED, flagged for human review. */

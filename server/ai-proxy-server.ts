@@ -31,6 +31,7 @@ import { OperationalLedger } from "../src/services/finance/ledger";
 import { submitManualBusiness, type ManualBusinessInput } from "../src/services/scout/manual-entry";
 import { TavilyWebDiscoveryProvider } from "../src/services/web-intelligence/tavily-web-discovery-provider";
 import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/web-intelligence/provider";
+import { MultimodalIntelligenceService } from "../src/services/multimodal-intelligence/service";
 
 let scoutDiscoveryEnabled = false;
 /** The scheduler's own repository + orchestrator, shared with manual entry so both feed one pipeline. */
@@ -57,8 +58,8 @@ async function initAtlasPersistence(): Promise<{ persistence: AtlasPersistence |
   return { persistence, applied };
 }
 
-function buildEvidenceCollectors(): EvidenceCollector[] {
-  const collectors: EvidenceCollector[] = [new WebsiteEvidenceCollector()];
+function buildEvidenceCollectors(collectImages = false): EvidenceCollector[] {
+  const collectors: EvidenceCollector[] = [new WebsiteEvidenceCollector({ collectImages })];
   if (process.env.GEOAPIFY_API_KEY) collectors.push(new PeerBenchmarkCollector({ provider: new GeoapifyDiscoveryProvider(), sourceUrl: "https://api.geoapify.com/v2/places" }));
   return collectors;
 }
@@ -340,11 +341,18 @@ export function createAiProxyServer(
         }
         const { deps, executionEnabled } = atlasPipeline;
         const missions = deps.missionQueue.getSnapshot();
+        const allMultimodalObservations = [...deps.store.multimodalObservations.values()].flat();
+        const multimodalObservations = allMultimodalObservations
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+          .slice(0, 25)
+          .map((item) => ({ ...item, businessName: deps.store.businesses.get(item.businessId)?.canonicalName ?? item.businessId, opportunityScore: deps.store.scores.get(item.businessId)?.overallScore ?? null }));
+        const observedImageSources = new Set(allMultimodalObservations.map((item) => item.sourceReference));
         sendJson(res, 200, {
           missionExecutionEnabled: executionEnabled,
           durable: !!atlasPipeline.persistence,
           persistence: atlasPipeline.persistence ? { ...atlasPipeline.persistence.health(), appliedMigrations: atlasPipeline.migrations } : null,
-          counts: { businesses: deps.store.businesses.size, scores: deps.store.scores.size, scoresWithheld: [...deps.store.scores.values()].filter((v) => v.overallScore === null).length, audits: deps.store.audits.size, missions: missions.length },
+          counts: { businesses: deps.store.businesses.size, scores: deps.store.scores.size, scoresWithheld: [...deps.store.scores.values()].filter((v) => v.overallScore === null).length, audits: deps.store.audits.size, missions: missions.length, multimodalObservations: [...deps.store.multimodalObservations.values()].reduce((total, rows) => total + rows.length, 0) },
+          multimodal: { enabled: !!deps.multimodalIntelligence, observations: multimodalObservations, imageSourcesWithObservations: observedImageSources.size },
           missions: missions.map((t) => ({ taskId: t.taskId, title: t.title, businessId: t.clientId, status: t.status, approvalRequired: t.approvalRequired })),
           trace: deps.store.trace.slice(-200),
         });
@@ -459,7 +467,11 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       throw new Error("SCOUT_DISCOVERY_CATEGORIES contains an invalid value");
     }
 
-    const pipelineOptions = { allowedSources: process.env.ATLAS_PIPELINE_SOURCES?.split(",").map((v) => v.trim()).filter(Boolean), collectors: buildEvidenceCollectors() };
+    const executionEnabled = process.env.ATLAS_MISSION_EXECUTION_ENABLED === "true";
+    const multimodalRequested = process.env.ATLAS_MULTIMODAL_ENABLED === "true";
+    const workforceEnabled = process.env.ATLAS_WORKFORCE_ENABLED !== "false";
+    const multimodalEnabled = multimodalRequested && workforceEnabled;
+    const pipelineOptions = { allowedSources: process.env.ATLAS_PIPELINE_SOURCES?.split(",").map((v) => v.trim()).filter(Boolean), collectors: buildEvidenceCollectors(multimodalEnabled) };
     let pipelineDeps: PipelineDeps | undefined;
     let ledger = new OperationalLedger();
     let repository: InMemoryBusinessRepository = new InMemoryBusinessRepository();
@@ -483,9 +495,12 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
     const orchestrator = new AtlasOrchestrator(undefined, true, pipelineDeps);
     if (pipelineDeps) {
       // Execution calls paid/rate-limited AI providers, so it is a second, separate opt-in.
-      const executionEnabled = process.env.ATLAS_MISSION_EXECUTION_ENABLED === "true";
       const providerRegistry = new ProviderRegistry();
-      if (executionEnabled) Object.values(buildProviders()).forEach((provider) => providerRegistry.registerProvider(provider));
+      const providers = executionEnabled || multimodalEnabled ? buildProviders() : null;
+      if (executionEnabled && providers) Object.values(providers).forEach((provider) => providerRegistry.registerProvider(provider));
+      if (multimodalEnabled && providers?.workforce) {
+        pipelineDeps.multimodalIntelligence = new MultimodalIntelligenceService(providers.workforce);
+      }
       const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: defaultWorkforceConfig, ledger, orchestrator });
       const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled });
       pipelineDeps.onMissionCreated = (task) => runner.autoExecute(task);

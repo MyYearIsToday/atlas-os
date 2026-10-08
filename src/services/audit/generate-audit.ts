@@ -5,6 +5,7 @@ export function generateAudit(input:AuditGeneratorInput):AuditGenerationResult {
   {key:"executive_summary",title:"Executive Summary",content:{visibilityScore:input.visibilityScore,opportunityScore:input.opportunityScore,nextAction:"See generated next action"},evidenceRefs:[],confidence:"UNKNOWN",observability:"OBSERVED_PRESENT"},
   {key:"business_profile",title:"Business Profile",content:{business:input.business},evidenceRefs:[],confidence:"UNKNOWN",observability:"OBSERVED_PRESENT"},
   {key:"visibility",title:"Visibility Score",content:{score:input.visibilityScore},evidenceRefs:[],confidence:"UNKNOWN",observability:"OBSERVED_PRESENT"},
+  {key:"visual_intelligence",title:"Visual Intelligence",content:{observations:input.multimodalObservations??[],verificationNote:"Model observations remain UNVERIFIED, are not evidence records, and do not affect opportunity scoring."},evidenceRefs:[],confidence:"UNKNOWN",observability:input.multimodalObservations?.length?"OBSERVED_PRESENT":"NOT_OBSERVABLE"},
   {key:"competitors",title:"Competitor Landscape",content:{gaps:input.competitorGaps,benchmark:input.competitorBenchmark},evidenceRefs:[],confidence:input.competitorBenchmark?"MEDIUM":"UNKNOWN",observability:input.competitorBenchmark?"OBSERVED_PRESENT":"NOT_OBSERVABLE"},
   {key:"opportunity",title:"Opportunity Score",content:{score:input.opportunityScore},evidenceRefs:[],confidence:"UNKNOWN",observability:"OBSERVED_PRESENT"},
   {key:"key_gaps",title:"Key Gaps",content:{},evidenceRefs:[],confidence:"UNKNOWN",observability:"NOT_OBSERVABLE"},

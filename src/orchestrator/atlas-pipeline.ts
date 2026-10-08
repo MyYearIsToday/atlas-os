@@ -8,6 +8,7 @@ import type { MissionQueueRepository, Task } from "../services/mission-queue";
 import { createInMemoryMissionQueue } from "../services/mission-queue";
 import type { EvidenceRecord } from "../services/evidence/evidence";
 import type { EvidenceCollector } from "../services/evidence/acquisition";
+import type { MultimodalIntelligence, MultimodalObservation } from "../services/multimodal-intelligence/service";
 import type { AtlasPersistence, Collection } from "../services/persistence/atlas-persistence";
 import { buildOpportunities } from "../services/scoring/opportunity-recommendations";
 import { OperationalLedger } from "../services/finance/ledger";
@@ -68,6 +69,8 @@ export class PipelineStore {
   readonly evidence: ObservedMap<ProvenanceEvidence[]>;
   /** Externally collected observations (website, peers) as standard EvidenceRecords. */
   readonly observations: ObservedMap<EvidenceRecord[]>;
+  /** AI media observations are stored separately; they are not EvidenceRecords or score inputs. */
+  readonly multimodalObservations: ObservedMap<MultimodalObservation[]>;
   readonly scores: ObservedMap<OpportunityScore>;
   readonly audits: ObservedMap<MapSparkAudit>;
   /** AI work products. Never evidence: isEvidence is always false. */
@@ -82,6 +85,7 @@ export class PipelineStore {
     this.businesses = bind("business");
     this.evidence = bind("evidence");
     this.observations = bind("observations");
+    this.multimodalObservations = bind("multimodal_observations");
     this.scores = bind("score");
     this.audits = bind("audit");
     this.missionOutputs = bind("mission_output");
@@ -101,6 +105,7 @@ export class PipelineStore {
     const fill = async <V,>(c: Collection, map: ObservedMap<V>) => { const rows = await p.loadAll(c); rows.forEach((r) => map.restore(r.id, r.doc)); return rows.length; };
     const counts = {
       businesses: await fill("business", this.businesses), evidence: await fill("evidence", this.evidence), observations: await fill("observations", this.observations),
+      multimodalObservations: await fill("multimodal_observations", this.multimodalObservations),
       scores: await fill("score", this.scores), audits: await fill("audit", this.audits), missionOutputs: await fill("mission_output", this.missionOutputs),
       started: 0, trace: 0,
     };
@@ -120,6 +125,8 @@ export interface PipelineDeps {
   allowedSources?: string[];
   /** Real evidence sources run on BusinessDiscovered. Empty/undefined = discovery provenance only. */
   collectors?: EvidenceCollector[];
+  /** Optional additive analysis layer; its output is never passed to scoring as evidence. */
+  multimodalIntelligence?: MultimodalIntelligence;
   /** Called after MissionCreated for every new task; the runner decides whether it may execute. */
   onMissionCreated?: (task: Task) => Promise<void>;
   /** Late-bound by the orchestrator so handlers can emit MissionCreated for additional tasks. */
@@ -129,8 +136,8 @@ export interface PipelineDeps {
   restoredEvents?: Array<{ eventId: string; processedAtMs: number }>;
 }
 
-export function createPipelineDeps(options: { allowedSources?: string[]; missionQueue?: MissionQueueRepository; collectors?: EvidenceCollector[] } = {}): PipelineDeps {
-  return { store: new PipelineStore(), missionQueue: options.missionQueue ?? createInMemoryMissionQueue(), allowedSources: options.allowedSources, collectors: options.collectors };
+export function createPipelineDeps(options: { allowedSources?: string[]; missionQueue?: MissionQueueRepository; collectors?: EvidenceCollector[]; multimodalIntelligence?: MultimodalIntelligence } = {}): PipelineDeps {
+  return { store: new PipelineStore(), missionQueue: options.missionQueue ?? createInMemoryMissionQueue(), allowedSources: options.allowedSources, collectors: options.collectors, multimodalIntelligence: options.multimodalIntelligence };
 }
 
 /** Ledger whose postings are mirrored to durable storage. Hydration replays them without re-persisting. */
@@ -157,7 +164,7 @@ export class DurableLedger extends OperationalLedger {
 }
 
 /** Builds the pipeline's working set from PostgreSQL. Missions, evidence, scores, audits, ledger and idempotency all survive restart. */
-export async function createDurablePipelineDeps(persistence: AtlasPersistence, options: { allowedSources?: string[]; collectors?: EvidenceCollector[] } = {}): Promise<{ deps: PipelineDeps; ledger: DurableLedger; hydrated: Record<string, number> }> {
+export async function createDurablePipelineDeps(persistence: AtlasPersistence, options: { allowedSources?: string[]; collectors?: EvidenceCollector[]; multimodalIntelligence?: MultimodalIntelligence } = {}): Promise<{ deps: PipelineDeps; ledger: DurableLedger; hydrated: Record<string, number> }> {
   const store = new PipelineStore(persistence);
   const hydrated = await store.hydrate();
   const tasks = (await persistence.loadAll("mission")).map((r) => r.doc as Task).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -172,7 +179,7 @@ export async function createDurablePipelineDeps(persistence: AtlasPersistence, o
   hydrated.missions = tasks.length;
   const restoredEvents = await persistence.loadEvents();
   hydrated.processedEvents = restoredEvents.length;
-  return { deps: { store, missionQueue, allowedSources: options.allowedSources, collectors: options.collectors, persistence, restoredEvents }, ledger, hydrated };
+  return { deps: { store, missionQueue, allowedSources: options.allowedSources, collectors: options.collectors, multimodalIntelligence: options.multimodalIntelligence, persistence, restoredEvents }, ledger, hydrated };
 }
 
 export function sourceAllowed(deps: PipelineDeps, business: BusinessIntelligence): boolean {
@@ -300,7 +307,7 @@ function summaryFacts(business: BusinessIntelligence, outcome: ScoringOutcome, o
   return `Summarize this audit for the operator using ONLY these facts; do not invent anything. Business: ${business.canonicalName} (${business.category ?? "uncategorized"}, ${business.address ?? "no address"}). Opportunity score: ${score}. Observed website/peer signals: ${observed}. Improvement areas: ${weak}. Not observed: ${outcome.missing.join(", ") || "nothing"}.`;
 }
 
-export function buildAuditInput(business: BusinessIntelligence, evidence: ProvenanceEvidence[], outcome: ScoringOutcome, observations: EvidenceRecord[] = []): AuditGeneratorInput {
+export function buildAuditInput(business: BusinessIntelligence, evidence: ProvenanceEvidence[], outcome: ScoringOutcome, observations: EvidenceRecord[] = [], multimodalObservations: MultimodalObservation[] = []): AuditGeneratorInput {
   const recommendations: AuditRecommendation[] = outcome.scorable
     ? outcome.score.keyOpportunities.map((opportunity): AuditRecommendation => ({
         recommendationId: `rec:${opportunity.id}`,
@@ -328,6 +335,7 @@ export function buildAuditInput(business: BusinessIntelligence, evidence: Proven
   return {
     business,
     evidence: [...evidence, ...observations],
+    multimodalObservations,
     evidenceCoverage: outcome.score.evidenceCoverage,
     visibilityScore: null,
     competitorGaps: [],
