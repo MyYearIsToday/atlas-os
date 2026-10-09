@@ -4,7 +4,7 @@ import { Link } from 'wouter';
 import { ArrowUpRight, Bot, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import { DataState, StateBadge } from '@/components/command-center/operating-panels';
 import { stateDescription, type Signal, type SignalState } from '@/services/command-center';
-import { asEmployees, asMissions, loadWorkforceBoard, submitMissionApproval, type ApprovalSubmission } from '@/services/workforce-client';
+import { appendWorkforceMissionPage, asEmployees, asMissions, loadWorkforceBoard, loadWorkforceMissionPage, submitMissionApproval, WORKFORCE_MISSION_PAGE_SIZE, type ApprovalSubmission, type WorkforceBoard } from '@/services/workforce-client';
 import {
   attentionItems, configurationState, formatDuration, formatRate, knownRoles, lensCounts, missionLens,
   missionLenses, missionMetrics, roleTitle, type MissionLens, type WorkforceMission,
@@ -34,6 +34,8 @@ export function WorkforcePage() {
   const [actor, setActor] = useState('');
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<ApprovalSubmission | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [paginationError, setPaginationError] = useState<string | null>(null);
   const titleId = useId();
   const query = useQuery({
     queryKey: ['atlas-workforce-board', base],
@@ -59,10 +61,53 @@ export function WorkforcePage() {
   const visible = missions?.filter((mission) => missionLens(mission) === lens) ?? [];
   const attention = missions ? attentionItems(missions) : null;
   const selected = missions?.find((mission) => mission.taskId === openId) ?? null;
+  const missionPage = board?.missions.data ?? null;
+  const missionScope = metrics
+    ? missionPage?.nextCursor
+      ? `${metrics.total} loaded; more pages available. API total not supplied.`
+      : `All pages loaded: ${metrics.total} records. API total not supplied.`
+    : 'Mission totals unavailable until the source responds.';
   const coverage: SignalState | string = !board || query.isPending ? 'LOADING' : board.missions.state === 'HEALTHY' || board.missions.state === 'EMPTY' ? 'SNAPSHOT RECEIVED' : board.missions.state;
 
+  const loadMoreMissions = async () => {
+    const queryKey = ['atlas-workforce-board', base];
+    const current = queryClient.getQueryData<WorkforceBoard>(queryKey);
+    const cursor = current?.missions.data?.nextCursor;
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    setPaginationError(null);
+    try {
+      const next = await loadWorkforceMissionPage(base, cursor);
+      if (!next.data || (next.state !== 'HEALTHY' && next.state !== 'EMPTY')) {
+        setPaginationError(stateDescription[next.state]);
+        return;
+      }
+      if (next.data.nextCursor === cursor) {
+        setPaginationError('The mission source did not advance its cursor. Refresh the snapshot before trying again.');
+        return;
+      }
+      queryClient.setQueryData<WorkforceBoard>(queryKey, (latest) => {
+        if (!latest?.missions.data) return latest;
+        const merged = appendWorkforceMissionPage(latest.missions.data, next.data!);
+        return {
+          ...latest,
+          missions: {
+            ...latest.missions,
+            state: merged.items.length ? 'HEALTHY' : 'EMPTY',
+            data: merged,
+            checkedAt: next.checkedAt,
+          },
+        };
+      });
+    } catch {
+      setPaginationError('Could not read the next mission page. Refresh the snapshot and try again.');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
   const approve = async (mission: WorkforceMission) => {
-    if (!mission.version || !/^human:.+/.test(actor.trim()) || pending) return;
+    if (!mission.version || board?.autonomy.data?.autonomy.missionExecutionEnabled !== true || !/^human:.+/.test(actor.trim()) || pending) return;
     setPending(true);
     setResult(null);
     const submission = await submitMissionApproval(base, { taskId: mission.taskId, actor: actor.trim(), version: mission.version });
@@ -94,17 +139,17 @@ export function WorkforcePage() {
     </div>
 
     <section className="cc-business" aria-label="Workforce metrics">
-      <div className="cc-strip-heading"><span className="cc-kicker">Operational counts</span><span>From the autonomy mission list and the workforce registry</span></div>
+      <div className="cc-strip-heading"><span className="cc-kicker">Operational counts</span><span>Mission metrics: {missionScope} · Roles: full registry</span></div>
       <div className="cc-business-grid">
         <Metric label="Working now" value="—" detail="Not exposed. Enabled is not the same as working." />
         <Metric label="Roles enabled" value={employees ? String(employees.filter((employee) => employee.enabled).length) : '—'} detail={employees ? `${employees.length} registered` : stateDescription[board?.workforce.state ?? 'LOADING']} />
-        <Metric label="Active missions" value={metrics ? String(metrics.active) : '—'} detail={metrics ? 'Status In Progress' : stateDescription[board?.missions.state ?? 'LOADING']} />
-        <Metric label="Queued" value={metrics ? String(metrics.queued) : '—'} detail="Pending, and not waiting on approval" />
-        <Metric label="Awaiting approval" value={metrics ? String(metrics.approval) : '—'} detail={board?.autonomy.data ? `${board.autonomy.data.counts.approvals} approval records stored` : 'Stored approval count unread'} />
-        <Metric label="Completed" value={metrics ? String(metrics.completed) : '—'} detail={metrics ? `${metrics.failed} failed · ${metrics.blocked} blocked` : 'Failed and blocked unread'} />
-        <Metric label="Success rate" value={metrics ? formatRate(metrics.successRate) : '—'} detail={metrics?.successRate === null ? 'No completed or failed sample' : `${metrics?.successDenominator} terminal missions`} />
+        <Metric label="Active missions" value={metrics ? String(metrics.active) : '—'} detail={metrics ? 'In Progress · loaded missions' : stateDescription[board?.missions.state ?? 'LOADING']} />
+        <Metric label="Queued" value={metrics ? String(metrics.queued) : '—'} detail="Pending, not waiting on approval · loaded missions" />
+        <Metric label="Awaiting approval" value={metrics ? String(metrics.approval) : '—'} detail="Pending mission approvals · loaded missions" />
+        <Metric label="Completed" value={metrics ? String(metrics.completed) : '—'} detail={metrics ? `${metrics.failed} failed · ${metrics.blocked} blocked · loaded missions` : 'Failed and blocked unread'} />
+        <Metric label="Success rate" value={metrics ? formatRate(metrics.successRate) : '—'} detail={metrics?.successRate === null ? 'No completed or failed sample' : `${metrics?.successDenominator} completed + failed · loaded missions`} />
       </div>
-      <p className="cc-footnote" style={{ padding: '0 16px 16px' }}>{metrics ? (metrics.averageDurationMs != null ? `Average duration ${formatDuration(metrics.averageDurationMs)} across ${metrics.durationSample} completed mission${metrics.durationSample === 1 ? '' : 's'} with both timestamps.` : 'Average duration unavailable. No completed mission in this snapshot has both a start and an end.') : 'Average duration unread.'}</p>
+      <p className="cc-footnote wf-scope">{metrics ? (metrics.averageDurationMs != null ? `Mean created-to-completed elapsed time ${formatDuration(metrics.averageDurationMs)} across ${metrics.durationSample} completed mission${metrics.durationSample === 1 ? '' : 's'} with both timestamps. This is lifecycle elapsed time, not execution runtime.` : 'Elapsed time unavailable. No completed mission in the loaded records has both timestamps.') : 'Elapsed time unavailable until mission records load.'}</p>
     </section>
 
     <section className="cc-panel cc-attention" aria-label="Attention required">
@@ -157,7 +202,12 @@ export function WorkforcePage() {
         <strong>{mission.title}</strong>
         <StateBadge state={missionLens(mission) === 'approval' ? 'WAITING APPROVAL' : mission.status.toUpperCase()} />
         <small>{mission.missionType ?? 'Unclassified type'} · {mission.approvalRequired} · created {when(mission.createdAt)}{typeof mission.attempts === 'number' ? ` · ${mission.attempts} recorded attempt${mission.attempts === 1 ? '' : 's'}` : ''}</small>
-      </button>)}</div>}
+       </button>)}</div>}
+      {missions && <div className="wf-pagination">
+        <span>{missionScope}</span>
+        {paginationError && <p role="alert" className="wf-error">{paginationError}</p>}
+        {missionPage?.nextCursor && <button className="cc-button cc-button-secondary focus-ring" onClick={() => void loadMoreMissions()} disabled={loadingMore || query.isFetching}>{loadingMore ? 'Loading next page…' : `Load next ${WORKFORCE_MISSION_PAGE_SIZE}`}</button>}
+      </div>}
     </section>
 
     {selected && <div className="wf-drawer-back" onClick={() => setOpenId(null)}>
@@ -173,19 +223,20 @@ export function WorkforcePage() {
           <div><span>Retries</span><strong>{typeof selected.retryCount === 'number' ? String(selected.retryCount) : 'Not recorded'}</strong></div>
           <div><span>Attempts</span><strong>{typeof selected.attempts === 'number' ? String(selected.attempts) : 'Not recorded'}</strong></div>
           <div><span>Assigned employee</span><strong>Not in this snapshot</strong></div>
-          <div><span>Duration</span><strong>{(() => { const ms = selected.status === 'Completed' && selected.createdAt && selected.completedAt ? Date.parse(selected.completedAt) - Date.parse(selected.createdAt) : NaN; return Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : 'Not measurable'; })()}</strong></div>
+          <div><span>Created → completed</span><strong>{(() => { const ms = selected.status === 'Completed' && selected.createdAt && selected.completedAt ? Date.parse(selected.completedAt) - Date.parse(selected.createdAt) : NaN; return Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : 'Not measurable'; })()}</strong></div>
         </div>
-        <p className="wf-note">Execution history, inputs, outputs, evidence, and lineage identifiers are not included in the mission list. Attempt count is the only execution figure this snapshot provides. No intermediate stages are filled in.</p>
+        <p className="wf-note">Execution runtime, inputs, outputs, evidence, and lineage identifiers are not included in the mission list. Creation-to-completion is lifecycle elapsed time, not time actively running. Attempt count is the only execution figure this snapshot provides.</p>
         {selected.lastFailureReason ? <p className="wf-note wf-error" style={{ marginTop: 10 }}>Last failure: {selected.lastFailureReason}</p> : <p className="wf-muted" style={{ marginTop: 10 }}>No failure reason on this record.</p>}
         <div style={{ marginTop: 18 }}>
           <p className="cc-kicker">Human authorization</p>
           {missionLens(selected) !== 'approval' && <p className="wf-note" style={{ marginTop: 10 }}>This mission is not awaiting approval, so no approval is offered.</p>}
           {missionLens(selected) === 'approval' && !selected.version && <p className="wf-note" style={{ marginTop: 10 }}>The snapshot has no object version. Atlas refuses approvals that do not name the exact version, so this screen will not submit one.</p>}
-          {missionLens(selected) === 'approval' && selected.version && <>
-            <p className="wf-muted" style={{ marginTop: 8 }}>Approving calls the existing mission approval. That authorizes a human-gated run of this mission. It does not edit the mission. Reject is not a mission operation.</p>
+          {missionLens(selected) === 'approval' && selected.version && board?.autonomy.data?.autonomy.missionExecutionEnabled !== true && <p className="wf-note" style={{ marginTop: 10 }}>{board?.autonomy.data?.autonomy.missionExecutionEnabled === false ? 'Mission execution is disabled. No approval can be submitted from Workforce.' : 'Mission execution availability could not be verified. No approval is offered.'}</p>}
+          {missionLens(selected) === 'approval' && selected.version && board?.autonomy.data?.autonomy.missionExecutionEnabled === true && <>
+            <p className="wf-muted" style={{ marginTop: 8 }}>This submits the server-generated mission version and a named human actor to Atlas’s existing approval endpoint. The server rechecks the exact version and its execution safeguards before any run; a changed mission is refused as stale. Reject is not a mission operation.</p>
             <form className="wf-form" onSubmit={(event) => { event.preventDefault(); void approve(selected); }}>
               <label htmlFor="wf-actor">Human actor <span className="wf-muted">required as human:id</span></label>
-              <input id="wf-actor" value={actor} onChange={(event) => setActor(event.target.value)} autoComplete="off" placeholder="human:kofi" spellCheck={false} />
+              <input id="wf-actor" value={actor} onChange={(event) => setActor(event.target.value)} autoComplete="off" autoCapitalize="off" placeholder="human:kofi" spellCheck={false} pattern="human:.+" required />
               <div className="wf-actions">
                 <button className="cc-button" type="submit" disabled={pending || !/^human:.+/.test(actor.trim())}>{pending ? 'Submitting' : 'Approve mission'}</button>
               </div>

@@ -282,7 +282,8 @@ const dec = (v: unknown) => JSON.stringify(v, (_k, x) => (typeof x === "bigint" 
   const ds = get("/api/atlas/autonomy/decisions", "businessId=b1").body as any;
   check("decisions list filters by business and type, newest first", ds.items.length === 1 && ds.items[0].decisionId === "d1" && (get("/api/atlas/autonomy/decisions", "type=NO_ACTION").body as any).items[0].decisionId === "d2");
   const ms = get("/api/atlas/autonomy/missions", "businessId=b1").body as any;
-  check("missions list is paginated, filterable and returns no outputs", ms.items.length === 2 && ms.items.every((m: any) => m.businessId === "b1" && m.missionType === "delivery_work") && !dec(ms).includes("text"));
+  const expectedMissionVersions = new Map(w.queue.getSnapshot().map((task) => [task.taskId, missionVersion(task)]));
+  check("missions list is paginated, filterable, and returns the approval hash without mission inputs or outputs", ms.items.length === 2 && ms.items.every((m: any) => m.businessId === "b1" && m.missionType === "delivery_work" && m.version === expectedMissionVersions.get(m.taskId)) && !dec(ms).includes("description") && !dec(ms).includes("text"));
   const tr = get("/api/atlas/autonomy/business/b1").body as any;
   const kinds = new Set(tr.timeline.map((e: any) => e.kind));
   check("business trace reconstructs score, audit, missions, prospect, engagement, invoice and payment on one ordered timeline", tr.business.name === "B1 Cafe" && tr.score.overall === 55 && tr.audit.auditId === "audit-b1" && tr.prospect.state === "WON" && tr.engagement.state === "COMPLETE" && tr.invoice.state === "PAYMENT_RECORDED" && ["decision", "mission", "prospect", "engagement", "invoice", "payment"].every((k) => kinds.has(k)) && tr.timeline.every((e: any, i: number, a: any[]) => i === 0 || a[i - 1].at <= e.at));

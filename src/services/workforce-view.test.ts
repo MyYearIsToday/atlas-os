@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { appendWorkforceMissionPage } from './workforce-client';
 import { configurationState, durationMs, formatRate, missionLens, missionMetrics, type WorkforceMission } from './workforce-view';
 
 const mission = (over: Partial<WorkforceMission>): WorkforceMission => ({
@@ -45,4 +46,13 @@ test('employee configuration is not reported as working', () => {
   assert.equal(configurationState({ employee: 'scout', enabled: true, source: 'dynamic', providerId: 'openrouter', model: 'm', fallback: 'f' }).label, 'Configured');
   assert.equal(configurationState({ employee: 'future_falconfx_worker', enabled: false, source: 'disabled', providerId: 'openrouter', model: null, fallback: null }).label, 'Disabled');
   assert.equal(configurationState({ employee: 'coding_engineer', enabled: true, source: 'static-fallback', providerId: 'nvidia', model: 'ultra', fallback: 'ultra' }).badge, 'DEGRADED');
+});
+
+test('mission pages append without duplicate task ids and retain the server cursor', () => {
+  const first = { items: [mission({ taskId: 'a' }), mission({ taskId: 'b' })], nextCursor: 'cursor-1' };
+  const next = { items: [mission({ taskId: 'b', title: 'stale duplicate' }), mission({ taskId: 'c' })], nextCursor: null };
+  const merged = appendWorkforceMissionPage(first, next);
+  assert.deepEqual(merged.items.map((item) => item.taskId), ['a', 'b', 'c']);
+  assert.equal(merged.items[1].title, 'Task');
+  assert.equal(merged.nextCursor, null);
 });

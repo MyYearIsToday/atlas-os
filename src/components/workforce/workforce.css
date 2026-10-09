@@ -99,3 +99,20 @@
 @media(max-width:1200px){.wf-root .cc-business-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.wf-root .cc-business-stat{border-bottom:1px solid #26384e}.wf-root .cc-business-stat:nth-child(4){border-right:0}}
 @media(max-width:760px){.wf-root{gap:16px}.wf-root .cc-header{padding-top:4px}.wf-root .cc-business-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.wf-root .cc-business-stat{padding:15px 13px;border-right:1px solid #26384e}.wf-root .cc-business-stat:nth-child(even){border-right:0}.wf-root .cc-business-stat:last-child{grid-column:1/-1}.wf-root .cc-strip-heading{align-items:flex-start}.wf-root .cc-panel-title{margin-bottom:17px}.wf-card{min-height:0}.wf-card>p{min-height:0}.wf-mission{padding:14px 5px}.wf-mission:hover{padding-left:8px}.wf-drawer{animation:none}.wf-root .cc-header-actions>div{justify-content:flex-start}}
 @media(prefers-reduced-motion:reduce){.wf-drawer-back,.wf-drawer{animation:none!important}.wf-card,.wf-mission,.wf-tabs button{transition:none!important}}
+.wf-scope{padding:0 16px 16px}
+.wf-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid #26384e;padding:14px 10px 2px;color:#91a3b9;font-size:10px;line-height:1.7}
+.wf-pagination>span{max-width:76ch}
+.wf-pagination .wf-error{flex-basis:100%;margin:0}
+.wf-pagination .cc-button{min-height:38px}
+.wf-root .cc-business-stat:last-child{border-right:0}
+@media(max-width:760px){
+  .wf-root .cc-header{flex-direction:column;align-items:flex-start;gap:16px}
+  .wf-root .cc-header-actions{width:100%;align-items:flex-start;gap:12px}
+  .wf-root .cc-header-actions>div{display:grid;grid-template-columns:1fr 1fr;width:100%}
+  .wf-root .cc-header-actions .cc-button{white-space:normal;text-align:center}
+  .wf-root .cc-panel{padding:18px 15px}
+  .wf-root .cc-business-stat:last-child{grid-column:1/-1;border-right:0}
+  .wf-pagination{align-items:stretch;flex-direction:column;padding-right:4px;padding-left:4px}
+  .wf-pagination .cc-button{width:100%}
+  .wf-scope{padding:0 13px 14px}
+}

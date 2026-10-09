@@ -3,6 +3,7 @@ import { classifyFailure, readSignal, type Signal } from './command-center';
 import type { RegistryEmployee, WorkforceMission } from './workforce-view';
 
 const count = z.number().int().nonnegative();
+export const WORKFORCE_MISSION_PAGE_SIZE = 100;
 
 export const workforceEmployeeSchema = z.object({
   employee: z.string(),
@@ -32,13 +33,14 @@ export const workforceMissionSchema = z.object({
   retryCount: count.optional(),
   completedAt: z.string().nullable().optional(),
   attempts: count.optional(),
-  version: z.string().min(1).optional(),
+  version: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 });
 
 export const missionsPageSchema = z.object({
   items: z.array(workforceMissionSchema),
   nextCursor: z.string().nullable(),
 });
+export type WorkforceMissionsPage = z.infer<typeof missionsPageSchema>;
 
 export const decisionItemSchema = z.object({
   decisionId: z.string(),
@@ -73,7 +75,7 @@ export interface WorkforceBoard {
   workforce: Signal<z.infer<typeof workforceBoardSchema>>;
   autonomy: Signal<z.infer<typeof autonomyStatusSchema>>;
   decisions: Signal<z.infer<typeof decisionsPageSchema>>;
-  missions: Signal<z.infer<typeof missionsPageSchema>>;
+  missions: Signal<WorkforceMissionsPage>;
 }
 
 export async function loadWorkforceBoard(base: string): Promise<WorkforceBoard> {
@@ -82,7 +84,7 @@ export async function loadWorkforceBoard(base: string): Promise<WorkforceBoard> 
     readSignal('/api/ai/workforce', workforceBoardSchema, base),
     readSignal('/api/atlas/autonomy/status', autonomyStatusSchema, base),
     readSignal('/api/atlas/autonomy/decisions?limit=12', decisionsPageSchema, base),
-    readSignal('/api/atlas/autonomy/missions?limit=100', missionsPageSchema, base),
+    readSignal(`/api/atlas/autonomy/missions?limit=${WORKFORCE_MISSION_PAGE_SIZE}`, missionsPageSchema, base),
   ]);
   return {
     health,
@@ -91,6 +93,26 @@ export async function loadWorkforceBoard(base: string): Promise<WorkforceBoard> 
     decisions: decisions.data?.items.length === 0 ? { ...decisions, state: 'EMPTY' } : decisions,
     missions: missions.data?.items.length === 0 ? { ...missions, state: 'EMPTY' } : missions,
   };
+}
+
+/** Fetches one additional keyset page from the existing read-only mission endpoint. */
+export async function loadWorkforceMissionPage(base: string, cursor: string, fetchImpl: typeof fetch = fetch): Promise<Signal<WorkforceMissionsPage>> {
+  const params = new URLSearchParams({ limit: String(WORKFORCE_MISSION_PAGE_SIZE), cursor });
+  const page = await readSignal(`/api/atlas/autonomy/missions?${params.toString()}`, missionsPageSchema, base, fetchImpl);
+  return page.data?.items.length === 0 ? { ...page, state: 'EMPTY' } : page;
+}
+
+/** Merge keyset pages defensively while keeping the server's next cursor. */
+export function appendWorkforceMissionPage(current: WorkforceMissionsPage, next: WorkforceMissionsPage): WorkforceMissionsPage {
+  const ids = new Set(current.items.map((mission) => mission.taskId));
+  const items = [...current.items];
+  for (const mission of next.items) {
+    if (!ids.has(mission.taskId)) {
+      ids.add(mission.taskId);
+      items.push(mission);
+    }
+  }
+  return { items, nextCursor: next.nextCursor };
 }
 
 export interface ApprovalSubmission {
