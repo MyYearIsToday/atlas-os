@@ -8,7 +8,7 @@ import {
 
 const nav = [
   { href: '/', label: 'Command Center', icon: LayoutDashboard },
-  { href: '/employees', label: 'AI Employees', icon: Bot },
+  { href: '/workforce', label: 'Workforce', icon: Bot },
   { href: '/mission-queue', label: 'Mission Queue', icon: ListTodo },
   { href: '/crm', label: 'CRM Pipeline', icon: Users },
   { href: '/scout', label: 'Scout Entry', icon: Radar },

@@ -13,6 +13,7 @@ import {
   VisibilityPage,
 } from '@/pages/atlas-pages';
 import { CommandCenterPage } from '@/pages/command-center-page';
+import { WorkforcePage } from '@/pages/workforce-page';
 import { CrmPage } from '@/pages/crm-page';
 import { MissionQueuePage } from '@/pages/mission-queue-page';
 import { ScoutPage } from '@/pages/scout-page';
@@ -32,6 +33,7 @@ function Router() {
       <RoutedErrorBoundary>
         <Switch>
           <Route path="/" component={CommandCenterPage} />
+          <Route path="/workforce" component={WorkforcePage} />
           <Route path="/employees" component={EmployeesPage} />
           <Route path="/crm" component={CrmPage} />
           <Route path="/mission-queue" component={MissionQueuePage} />
