@@ -32,6 +32,7 @@ import { submitManualBusiness, type ManualBusinessInput } from "../src/services/
 import { TavilyWebDiscoveryProvider } from "../src/services/web-intelligence/tavily-web-discovery-provider";
 import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/web-intelligence/provider";
 import { MultimodalIntelligenceService } from "../src/services/multimodal-intelligence/service";
+import { handleWorkspaceRequest } from "./workspace/workspace-store";
 
 let scoutDiscoveryEnabled = false;
 /** The scheduler's own repository + orchestrator, shared with manual entry so both feed one pipeline. */
@@ -330,6 +331,14 @@ export function createAiProxyServer(
         }
         sendJson(res, status, payload);
         logRequest(method, parsedUrl.pathname, status, Date.now() - started);
+        return;
+      }
+
+      if (parsedUrl.pathname.startsWith("/api/workspace/")) {
+        // Workspace records persist through the pipeline's PostgreSQL store; null persistence -> 503 (never RAM).
+        const r = await handleWorkspaceRequest(method, parsedUrl.pathname, () => readJsonBody(req), { persistence: atlasPipeline?.persistence ?? null, secretConfigured: !!process.env.ATLAS_PROXY_SHARED_SECRET });
+        sendJson(res, r.status, r.body);
+        logRequest(method, parsedUrl.pathname, r.status, Date.now() - started);
         return;
       }
 

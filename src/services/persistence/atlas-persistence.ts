@@ -10,7 +10,9 @@
 export type Collection =
   | "business" | "external_key" | "evidence" | "observations" | "multimodal_observations" | "score" | "audit"
   | "mission" | "mission_output" | "ledger" | "trace" | "started"
-  | "prospect" | "engagement" | "decision" | "invoice" | "approval" | "cycle" | "decision_exec" | "autonomy_state";
+  | "prospect" | "engagement" | "decision" | "invoice" | "approval" | "cycle" | "decision_exec" | "autonomy_state"
+  // Workspace records saved from the Atlas frontend (see server/workspace/workspace-store.ts); same atlas_documents table, no migration.
+  | "workspace_leads" | "workspace_missions" | "workspace_content" | "workspace_opportunities" | "workspace_clients" | "workspace_businesses" | "workspace_expenses" | "workspace_income";
 
 export interface SqlClient {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, any>> }>;
