@@ -1,4 +1,4 @@
-export interface DiscoveryQuery { latitude: number; longitude: number; radiusMeters: number; categories: string[]; }
+export interface DiscoveryQuery { latitude: number; longitude: number; radiusMeters: number; /** Optional bounding box [minLon, minLat, maxLon, maxLat]; when present Geoapify searches this area instead of a circle. */ rect?: [number, number, number, number]; categories: string[]; }
 export interface ProviderSourceMetadata {
   sourceId: string;
   name: string;

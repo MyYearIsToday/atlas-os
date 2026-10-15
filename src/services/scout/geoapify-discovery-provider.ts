@@ -113,7 +113,7 @@ export class GeoapifyDiscoveryProvider implements BusinessDiscoveryProvider {
       throw new Error("Geoapify endpoint is not a valid URL");
     }
     url.searchParams.set("categories", categories.join(","));
-    url.searchParams.set("filter", `circle:${query.longitude},${query.latitude},${query.radiusMeters}`);
+    url.searchParams.set("filter", query.rect ? `rect:${query.rect.join(",")}` : `circle:${query.longitude},${query.latitude},${query.radiusMeters}`);
     url.searchParams.set("limit", String(this.limit));
     url.searchParams.set("apiKey", apiKey);
 

@@ -32,6 +32,7 @@ import { submitManualBusiness, type ManualBusinessInput } from "../src/services/
 import { TavilyWebDiscoveryProvider } from "../src/services/web-intelligence/tavily-web-discovery-provider";
 import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/web-intelligence/provider";
 import { MultimodalIntelligenceService } from "../src/services/multimodal-intelligence/service";
+import { buildBusinessView } from "./atlas/business-view";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 
 let scoutDiscoveryEnabled = false;
@@ -40,6 +41,8 @@ let scoutPipeline: { repository: InMemoryBusinessRepository; orchestrator: Atlas
 /** Downstream Atlas pipeline (evidence -> score -> audit -> mission). Opt-in via ATLAS_PIPELINE_ENABLED=true. */
 /** Postgres handle for workspace CRUD. Set at startup whenever persistence initialises, independent of Scout scheduling. */
 let workspacePersistence: AtlasPersistence | null = null;
+/** Runs one Scout discovery on demand (set only when discovery is enabled and configured). */
+let discoveryTrigger: (() => Promise<{ ok: boolean; candidatesFound: number; error?: string; outcomes: { action: string }[] } | null>) | null = null;
 let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean; persistence: AtlasPersistence | null; migrations: number[]; autonomy: AutonomyRuntime } | null = null;
 
 /**
@@ -344,6 +347,15 @@ export function createAiProxyServer(
         return;
       }
 
+      if (method === "GET" && url === "/api/atlas/businesses") {
+        if (!atlasPipeline) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline is not enabled" } }); logRequest(method, url, 503, Date.now() - started); return; }
+        const { deps, autonomy } = atlasPipeline;
+        const items = buildBusinessView({ businesses: deps.store.businesses.values(), scores: deps.store.scores, audits: deps.store.audits, tasks: deps.missionQueue.getSnapshot(), prospects: autonomy.lifecycle.prospects.values(), approvals: autonomy.lifecycle.approvals.values(), outputs: deps.store.missionOutputs });
+        sendJson(res, 200, { durable: !!atlasPipeline.persistence, items });
+        logRequest(method, url, 200, Date.now() - started);
+        return;
+      }
+
       if (method === "GET" && url === "/api/atlas/pipeline") {
         if (!atlasPipeline) {
           sendJson(res, 503, { failed: true, code: "PROVIDER_UNAVAILABLE", reason: "Atlas pipeline is not enabled" });
@@ -389,6 +401,17 @@ export function createAiProxyServer(
         console.log(`[atlas-pipeline][execute] outcome=${summary.outcome} executed=${summary.executed}`);
         sendJson(res, status, summary);
         logRequest(method, url, status, Date.now() - started);
+        return;
+      }
+
+      if (method === "POST" && url === "/api/scout/discover") {
+        if (!discoveryTrigger) { sendJson(res, 503, { error: { code: "discovery_disabled", message: "Scout discovery is not enabled or not configured" } }); logRequest(method, url, 503, Date.now() - started); return; }
+        const run = await discoveryTrigger();
+        await atlasPipeline?.persistence?.flush();
+        if (!run) { sendJson(res, 409, { error: { code: "already_running", message: "A discovery run is already in progress" } }); logRequest(method, url, 409, Date.now() - started); return; }
+        const created = run.outcomes.filter((o) => o.action === "CREATED").length;
+        sendJson(res, run.ok ? 200 : 502, { ok: run.ok, candidatesFound: run.candidatesFound, created, updated: run.outcomes.length - created, ...(run.error ? { error: run.error } : {}) });
+        logRequest(method, url, run.ok ? 200 : 502, Date.now() - started);
         return;
       }
 
@@ -452,6 +475,10 @@ class FatalStartupError extends Error {}
 /** Stops the autonomy timer (used on shutdown; an in-flight cycle finishes and persists). */
 function atlasPipelineStop(): void { atlasPipeline?.autonomy.scheduler.stop(); }
 
+/** Approximate Greater Accra Region bounding box [minLon, minLat, maxLon, maxLat] and centre [lat, lon] (Accra). */
+const GREATER_ACCRA_RECT: [number, number, number, number] = [-0.62, 5.5, 0.72, 6.12];
+const GREATER_ACCRA_CENTRE: [number, number] = [5.6037, -0.187];
+
 async function startScoutScheduler(persistence: AtlasPersistence | null, applied: number[]): Promise<ScoutScheduler | null> {
   if (process.env.SCOUT_DISCOVERY_ENABLED !== "true") {
     console.log("[atlas-scout] discovery disabled (SCOUT_DISCOVERY_ENABLED is not true)");
@@ -465,9 +492,12 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       throw new Error("SCOUT_DISCOVERY_SOURCE must explicitly be overpass or geoapify");
     }
 
-    const latitude = requiredScoutNumber("SCOUT_DISCOVERY_LATITUDE", -90, 90);
-    const longitude = requiredScoutNumber("SCOUT_DISCOVERY_LONGITUDE", -180, 180);
-    const radiusMeters = requiredScoutNumber("SCOUT_DISCOVERY_RADIUS_METERS", 1, 50000, true);
+    // Geoapify searches the whole Greater Accra Region (bounding box) instead of a radius around a point.
+    // Latitude/longitude/radius are therefore optional for geoapify and only used as a fallback centre.
+    const wholeRegion = discoverySource === "geoapify";
+    const latitude = wholeRegion && !process.env.SCOUT_DISCOVERY_LATITUDE ? GREATER_ACCRA_CENTRE[0] : requiredScoutNumber("SCOUT_DISCOVERY_LATITUDE", -90, 90);
+    const longitude = wholeRegion && !process.env.SCOUT_DISCOVERY_LONGITUDE ? GREATER_ACCRA_CENTRE[1] : requiredScoutNumber("SCOUT_DISCOVERY_LONGITUDE", -180, 180);
+    const radiusMeters = wholeRegion ? 1 : requiredScoutNumber("SCOUT_DISCOVERY_RADIUS_METERS", 1, 50000, true);
     const intervalMs = requiredScoutNumber("SCOUT_DISCOVERY_INTERVAL_MS", 60000, 2592000000, true);
     const rawCategories = process.env.SCOUT_DISCOVERY_CATEGORIES?.trim();
     if (!rawCategories) throw new Error("SCOUT_DISCOVERY_CATEGORIES is required");
@@ -544,7 +574,7 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
     scheduler = new ScoutScheduler({
       provider: createScoutDiscoveryProvider(),
       repository,
-      query: { latitude, longitude, radiusMeters, categories },
+      query: { latitude, longitude, radiusMeters, categories, ...(wholeRegion ? { rect: GREATER_ACCRA_RECT } : {}) },
       dispatch: (type, payload) => orchestrator.dispatch(type, payload),
     });
     scheduler.onRun((result) => {
@@ -568,6 +598,8 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       }
     });
     scheduler.start(intervalMs);
+    const runner0 = scheduler;
+    discoveryTrigger = () => runner0.triggerNow();
     scoutPipeline = { repository, orchestrator };
     scoutDiscoveryEnabled = true;
     console.log(`[atlas-scout] discovery enabled source=${discoverySource} intervalMs=${intervalMs}`);
