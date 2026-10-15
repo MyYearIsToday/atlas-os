@@ -38,6 +38,8 @@ let scoutDiscoveryEnabled = false;
 /** The scheduler's own repository + orchestrator, shared with manual entry so both feed one pipeline. */
 let scoutPipeline: { repository: InMemoryBusinessRepository; orchestrator: AtlasOrchestrator } | null = null;
 /** Downstream Atlas pipeline (evidence -> score -> audit -> mission). Opt-in via ATLAS_PIPELINE_ENABLED=true. */
+/** Postgres handle for workspace CRUD. Set at startup whenever persistence initialises, independent of Scout scheduling. */
+let workspacePersistence: AtlasPersistence | null = null;
 let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean; persistence: AtlasPersistence | null; migrations: number[]; autonomy: AutonomyRuntime } | null = null;
 
 /**
@@ -336,7 +338,7 @@ export function createAiProxyServer(
 
       if (parsedUrl.pathname.startsWith("/api/workspace/")) {
         // Workspace records persist through the pipeline's PostgreSQL store; null persistence -> 503 (never RAM).
-        const r = await handleWorkspaceRequest(method, parsedUrl.pathname, () => readJsonBody(req), { persistence: atlasPipeline?.persistence ?? null, secretConfigured: !!process.env.ATLAS_PROXY_SHARED_SECRET });
+        const r = await handleWorkspaceRequest(method, parsedUrl.pathname, () => readJsonBody(req), { persistence: atlasPipeline?.persistence ?? workspacePersistence, secretConfigured: !!process.env.ATLAS_PROXY_SHARED_SECRET });
         sendJson(res, r.status, r.body);
         logRequest(method, parsedUrl.pathname, r.status, Date.now() - started);
         return;
@@ -591,6 +593,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   try {
     const init = await initAtlasPersistence();
     persistenceHandle = init.persistence;
+    workspacePersistence = init.persistence;
     scoutScheduler = await startScoutScheduler(init.persistence, init.applied); // hydrates before the port opens
   } catch (error) {
     console.error(`[atlas-persistence] FATAL startup error: ${error instanceof Error ? error.message : "unknown"}`);
