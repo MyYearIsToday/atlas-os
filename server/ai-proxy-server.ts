@@ -33,6 +33,8 @@ import { TavilyWebDiscoveryProvider } from "../src/services/web-intelligence/tav
 import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/web-intelligence/provider";
 import { MultimodalIntelligenceService } from "../src/services/multimodal-intelligence/service";
 import { buildBusinessView } from "./atlas/business-view";
+import { ProcessController, buildCandidateView, readDossier, startCandidate, type ActionContext } from "./atlas/scout-actions";
+import { DossierEngine } from "./atlas/dossier";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 
 let scoutDiscoveryEnabled = false;
@@ -43,6 +45,8 @@ let scoutPipeline: { repository: InMemoryBusinessRepository; orchestrator: Atlas
 let workspacePersistence: AtlasPersistence | null = null;
 /** Runs one Scout discovery on demand (set only when discovery is enabled and configured). */
 let discoveryTrigger: (() => Promise<{ ok: boolean; candidatesFound: number; error?: string; outcomes: { action: string }[] } | null>) | null = null;
+const processController = new ProcessController();
+let dossierEngine: DossierEngine | null = null;
 let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean; persistence: AtlasPersistence | null; migrations: number[]; autonomy: AutonomyRuntime } | null = null;
 
 /**
@@ -356,6 +360,40 @@ export function createAiProxyServer(
         return;
       }
 
+      if (url === "/api/scout/candidates" || url === "/api/scout/candidates/start" || url === "/api/atlas/process" || url.startsWith("/api/atlas/dossiers/")) {
+        // Scout visibility, per-business operator authorisation, the staged internal dossier and one bounded on-demand cycle. Internal work only.
+        if (!atlasPipeline || !scoutPipeline || !dossierEngine) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline or Scout is not running" } }); logRequest(method, url, 503, Date.now() - started); return; }
+        const actionCtx: ActionContext = {
+          repository: scoutPipeline.repository, orchestrator: scoutPipeline.orchestrator,
+          pipeline: { deps: atlasPipeline.deps, autonomy: atlasPipeline.autonomy, persistence: atlasPipeline.persistence },
+          engine: dossierEngine,
+        };
+        let status = 200; let payload: unknown;
+        if (method === "GET" && url === "/api/scout/candidates") {
+          payload = { durable: !!atlasPipeline.persistence, items: buildCandidateView({ discovered: scoutPipeline.repository.list(), pipeline: { deps: atlasPipeline.deps, autonomy: atlasPipeline.autonomy } }) };
+        } else if (method === "POST" && url === "/api/scout/candidates/start") {
+          const body = await readJsonBody(req);
+          ({ status, body: payload } = await startCandidate(actionCtx, (body as { businessId?: unknown } | null)?.businessId));
+        } else if (method === "POST" && url === "/api/atlas/process") {
+          const { started, done } = processController.begin(actionCtx, scoutPipeline.repository.list());
+          if (!started) { status = 409; payload = { ok: false, error: "already_running", ...processController.status() }; }
+          else {
+            await Promise.race([done, new Promise((r) => setTimeout(r, 18_000))]);
+            const st = processController.status();
+            status = st.running ? 202 : 200; payload = { ok: true, ...st };
+          }
+        } else if (method === "GET" && url.startsWith("/api/atlas/dossiers/")) {
+          const id = decodeURIComponent(url.slice("/api/atlas/dossiers/".length));
+          const found = /^[A-Za-z0-9_-]{1,80}$/.test(id) ? readDossier(atlasPipeline.deps, id) : null;
+          if (!found) { status = 404; payload = { error: { code: "not_found", message: "no dossier for this business" } }; } else payload = found;
+        } else if (method === "GET" && url === "/api/atlas/process") {
+          payload = processController.status();
+        } else { status = 405; payload = { error: { code: "method_not_allowed", message: "unsupported method" } }; }
+        sendJson(res, status, payload);
+        logRequest(method, url, status, Date.now() - started);
+        return;
+      }
+
       if (method === "GET" && url === "/api/atlas/pipeline") {
         if (!atlasPipeline) {
           sendJson(res, 503, { failed: true, code: "PROVIDER_UNAVAILABLE", reason: "Atlas pipeline is not enabled" });
@@ -560,7 +598,10 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       });
       const execute = createInternalExecutor({ pipeline: pipelineDeps.store, collectors: pipelineDeps.collectors ?? [], missionQueue: pipelineDeps.missionQueue, lifecycle, dispatcher: orchestrator, prospects, delivery, revenue });
       const cycleDeps = { policy: defaultAutonomyPolicy, lifecycle, pipeline: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, ledger, execute, metricInputs, persistenceHealthy: () => persistence?.health().ok ?? true };
-      const autonomyScheduler = new AutonomyScheduler(async (trigger) => { const c = await runAutonomyCycle(cycleDeps, trigger); await persistence?.flush(); return c; }, (e) => console.error(`[atlas-autonomy] cycle error: ${e instanceof Error ? e.message : "unknown"}`));
+      const searchProvider = new TavilyWebDiscoveryProvider();
+      dossierEngine = new DossierEngine({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 5 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })) });
+      const engine = dossierEngine;
+      const autonomyScheduler = new AutonomyScheduler(async (trigger) => { const c = await runAutonomyCycle(cycleDeps, trigger); if (trigger === "scheduled") await engine.tick(3).catch((e) => console.error(`[atlas-dossier] tick error: ${e instanceof Error ? e.message : "unknown"}`)); await persistence?.flush(); return c; }, (e) => console.error(`[atlas-autonomy] cycle error: ${e instanceof Error ? e.message : "unknown"}`));
       const autonomyEnabled = process.env.ATLAS_AUTONOMY_ENABLED === "true";
       const autonomy: AutonomyRuntime = { policy: defaultAutonomyPolicy, lifecycle, pipeline: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, ledger, revenue, approvals, scheduler: autonomyScheduler, autonomyEnabled, executionEnabled, persistenceHealth: () => persistence?.health() ?? null, metricInputs, now: () => new Date().toISOString() };
       if (autonomyEnabled) {

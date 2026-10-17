@@ -17,7 +17,7 @@ const rec = (over: Record<string, unknown>) => ({ recommendationId: "r1", action
   check("missing or unrecognized approval metadata becomes Approval Required", missing.approvalRequired === "Approval Required" && unknownLevel.approvalRequired === "Approval Required");
   check("collect_missing_evidence can never be auto even if marked AUTO", collect.approvalRequired === "Approval Required" && collect.missionType === "collect_missing_evidence");
   check("internal_audit_summary is explicitly tagged and honors AUTO", summary.approvalRequired === "Auto" && summary.missionType === "internal_audit_summary");
-  check("the autonomous allowlist contains exactly internal_audit_summary", AUTONOMOUS_SAFE_MISSION_TYPES.size === 1 && AUTONOMOUS_SAFE_MISSION_TYPES.has("internal_audit_summary"));
+  check("the autonomous allowlist contains exactly the internal types (audit summary + dossier stages) and never follow-ups", AUTONOMOUS_SAFE_MISSION_TYPES.size === 6 && AUTONOMOUS_SAFE_MISSION_TYPES.has("internal_audit_summary") && ["dossier_profile", "dossier_audit", "dossier_swot", "dossier_growth", "dossier_plan"].every((t) => AUTONOMOUS_SAFE_MISSION_TYPES.has(t)) && !AUTONOMOUS_SAFE_MISSION_TYPES.has("dossier_followup"));
 }
 
 // --- Execution disabled (production default) ---

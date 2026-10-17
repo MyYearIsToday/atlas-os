@@ -2,7 +2,7 @@ import type { AutonomousWorkforce, MissionLifecycleDispatcher, MissionRunResult 
 import type { MissionQueueRepository, Task } from "../services/mission-queue";
 import type { OperationalLedger } from "../services/finance/ledger";
 import type { PipelineStore } from "./atlas-pipeline";
-import { INTERNAL_AUDIT_SUMMARY } from "./atlas-pipeline";
+import { INTERNAL_AUDIT_SUMMARY, DOSSIER_MISSION_TYPES } from "./atlas-pipeline";
 
 /**
  * Mission types that may start themselves. Allowlist, not denylist: anything unlisted (including a
@@ -10,7 +10,7 @@ import { INTERNAL_AUDIT_SUMMARY } from "./atlas-pipeline";
  * reads Atlas-owned data and has no external side effect, financial commitment, messaging, publishing,
  * purchasing or mutation of an outside system.
  */
-export const AUTONOMOUS_SAFE_MISSION_TYPES: ReadonlySet<string> = new Set([INTERNAL_AUDIT_SUMMARY]);
+export const AUTONOMOUS_SAFE_MISSION_TYPES: ReadonlySet<string> = new Set<string>([INTERNAL_AUDIT_SUMMARY, ...DOSSIER_MISSION_TYPES]);
 
 /**
  * Connects mission execution to the existing AutonomousWorkforce and closes the loop with a
