@@ -1,3 +1,4 @@
+import type { Dossier } from "./dossier-types";
 import type { BusinessIntelligence } from "../services/evidence/business-intelligence";
 import type { OpportunityInput } from "../services/scoring/opportunity-score";
 import type { OpportunityScore } from "../services/scoring/opportunity-types";
@@ -75,6 +76,8 @@ export class PipelineStore {
   readonly audits: ObservedMap<MapSparkAudit>;
   /** AI work products. Never evidence: isEvidence is always false. */
   readonly missionOutputs: ObservedMap<MissionOutput>;
+  /** Staged research dossiers (work product, never evidence), one per authorised business. */
+  readonly dossiers: ObservedMap<Dossier>;
   readonly trace: PipelineTraceEntry[] = [];
   /** Businesses that have entered the pipeline; a re-discovery must not spawn duplicate audits or missions. */
   readonly started: ObservedSet;
@@ -89,6 +92,7 @@ export class PipelineStore {
     this.scores = bind("score");
     this.audits = bind("audit");
     this.missionOutputs = bind("mission_output");
+    this.dossiers = bind("dossier");
     this.started = new ObservedSet((id) => persistence?.put("started", id, { id }));
   }
 
@@ -106,7 +110,7 @@ export class PipelineStore {
     const counts = {
       businesses: await fill("business", this.businesses), evidence: await fill("evidence", this.evidence), observations: await fill("observations", this.observations),
       multimodalObservations: await fill("multimodal_observations", this.multimodalObservations),
-      scores: await fill("score", this.scores), audits: await fill("audit", this.audits), missionOutputs: await fill("mission_output", this.missionOutputs),
+      scores: await fill("score", this.scores), audits: await fill("audit", this.audits), missionOutputs: await fill("mission_output", this.missionOutputs), dossiers: await fill("dossier", this.dossiers),
       started: 0, trace: 0,
     };
     (await p.loadAll("started")).forEach((r) => { this.started.restore(r.id); counts.started++; });
@@ -123,6 +127,8 @@ export interface PipelineDeps {
   missionQueue: MissionQueueRepository;
   /** Only businesses with one of these source references enter the pipeline. Undefined = all. */
   allowedSources?: string[];
+  /** Business ids the operator explicitly authorised (Scout "Start Atlas"). They bypass the source filter, for that business only. */
+  authorizedBusinessIds?: Set<string>;
   /** Real evidence sources run on BusinessDiscovered. Empty/undefined = discovery provenance only. */
   collectors?: EvidenceCollector[];
   /** Optional additive analysis layer; its output is never passed to scoring as evidence. */
@@ -184,6 +190,7 @@ export async function createDurablePipelineDeps(persistence: AtlasPersistence, o
 
 export function sourceAllowed(deps: PipelineDeps, business: BusinessIntelligence): boolean {
   if (!deps.allowedSources) return true;
+  if (deps.authorizedBusinessIds?.has(business.id)) return true;
   return business.sourceReferences.some((source) => deps.allowedSources!.includes(source));
 }
 
@@ -298,6 +305,9 @@ export function applyScoringGate(raw: OpportunityScore): ScoringOutcome {
 
 /** The only mission type that may start itself: a summary of Atlas-owned data for the operator. No external side effects. */
 export const INTERNAL_AUDIT_SUMMARY = "internal_audit_summary";
+
+/** Dossier stage missions (internal AI text work products for one operator-authorised business; never evidence, no external effect). */
+export const DOSSIER_MISSION_TYPES = ["dossier_profile", "dossier_audit", "dossier_swot", "dossier_growth", "dossier_plan"] as const;
 
 /** Facts handed to the summary mission, built only from Atlas's own stored state. */
 function summaryFacts(business: BusinessIntelligence, outcome: ScoringOutcome, observations: EvidenceRecord[]): string {

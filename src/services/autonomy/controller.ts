@@ -42,7 +42,8 @@ export interface AutonomyState { now: string; businesses: BusinessState[]; spent
 /** Reads durable state into the controller's input. Pure reads; nothing is mutated. */
 export function buildAutonomyState(input: { now: string; pipeline: PipelineStore; missions: Task[]; lifecycle: LifecycleStore; spentTodayUsd: number }): AutonomyState {
   const { pipeline, missions, lifecycle } = input;
-  const businesses: BusinessState[] = [...pipeline.businesses.values()].map((b): BusinessState => {
+  // Only businesses the operator started (or entered manually) are worked on; hydration also loads unstarted Scout records.
+  const businesses: BusinessState[] = [...pipeline.businesses.values()].filter((b) => pipeline.started.has(b.id)).map((b): BusinessState => {
     const obs = pipeline.observations.get(b.id) ?? [];
     const score: OpportunityScore | undefined = pipeline.scores.get(b.id);
     const newest = obs.map((o) => o.observedAt).sort().pop() ?? null;
