@@ -92,7 +92,7 @@ export function readDossier(deps: PipelineDeps, businessId: string) {
   const d = deps.store.dossiers.get(businessId);
   if (!d) return null;
   const tasks = deps.missionQueue.getSnapshot();
-  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
+  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, competitorApproval: d.competitorApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
 }
 
 // ---------------------------------------------------------------- start one business
