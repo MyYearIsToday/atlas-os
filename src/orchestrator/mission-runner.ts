@@ -88,7 +88,8 @@ export class MissionRunner {
     const providerResult = result.result && "text" in result.result ? result.result : undefined;
     if (providerResult) {
       // Model output is a work product, never evidence: it is stored apart and flagged accordingly.
-      store.missionOutputs.set(taskId, { generatedBy: `${providerResult.provider}/${providerResult.model}`, text: providerResult.text, isEvidence: false });
+      const wf = (providerResult as { workforce?: { employee?: string; usedFallback?: boolean } }).workforce;
+      store.missionOutputs.set(taskId, { generatedBy: `${providerResult.provider}/${providerResult.model}${wf?.employee ? ` via workforce:${wf.employee}${wf.usedFallback ? " (fallback)" : ""}` : ""}`, text: providerResult.text, isEvidence: false });
     }
     const transactions = ledger.list().filter((t) => t.evidenceRefs.includes(`lineage:${result.lineageId}`));
     const day = (this.options.now?.() ?? new Date()).toISOString().slice(0, 10);

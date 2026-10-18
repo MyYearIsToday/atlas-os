@@ -4,7 +4,8 @@ import { NvidiaProvider } from "../src/workforce/nvidia-provider";
 import type { AIProvider } from "../src/workforce/provider-interface";
 import type { AIJobRequest, ProviderId } from "../src/workforce/provider-types";
 import { defaultWorkforceConfig } from "../src/workforce/workforce-config";
-import { WorkforceProvider } from "./workforce/workforce-provider";
+import { safeFetch } from "./atlas/source-tools";
+import { WorkforceProvider, withWorkforceRouting } from "./workforce/workforce-provider";
 import { AtlasOrchestrator } from "../src/orchestrator/orchestrator";
 import { InMemoryBusinessRepository } from "../src/services/scout/business-repository";
 import { createScoutDiscoveryProvider } from "../src/services/scout/discovery-provider-factory";
@@ -33,7 +34,7 @@ import { TavilyWebDiscoveryProvider } from "../src/services/web-intelligence/tav
 import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/web-intelligence/provider";
 import { MultimodalIntelligenceService } from "../src/services/multimodal-intelligence/service";
 import { buildBusinessView } from "./atlas/business-view";
-import { ProcessController, buildCandidateView, readDossier, startCandidate, type ActionContext } from "./atlas/scout-actions";
+import { ProcessController, buildCandidateView, readDossier, readMissionResult, startCandidate, type ActionContext } from "./atlas/scout-actions";
 import { DossierEngine } from "./atlas/dossier";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 
@@ -351,6 +352,14 @@ export function createAiProxyServer(
         return;
       }
 
+      if (method === "GET" && /^\/api\/atlas\/missions\/[A-Za-z0-9_-]{1,80}\/result$/.test(url)) {
+        if (!atlasPipeline) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline is not enabled" } }); logRequest(method, url, 503, Date.now() - started); return; }
+        const found = readMissionResult(atlasPipeline.deps, url.split("/")[4]);
+        sendJson(res, found ? 200 : 404, found ?? { error: { code: "not_found", message: "unknown mission" } });
+        logRequest(method, url, found ? 200 : 404, Date.now() - started);
+        return;
+      }
+
       if (method === "GET" && url === "/api/atlas/businesses") {
         if (!atlasPipeline) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline is not enabled" } }); logRequest(method, url, 503, Date.now() - started); return; }
         const { deps, autonomy } = atlasPipeline;
@@ -382,6 +391,13 @@ export function createAiProxyServer(
             const st = processController.status();
             status = st.running ? 202 : 200; payload = { ok: true, ...st };
           }
+        } else if (method === "POST" && /^\/api\/atlas\/dossiers\/[A-Za-z0-9_-]{1,80}\/sources$/.test(url)) {
+          // Operator source/image decisions and the approval checkpoint. Internal only; approving sources sends nothing to anyone.
+          const id = url.split("/")[4];
+          const body = ((await readJsonBody(req)) ?? {}) as Record<string, unknown>;
+          ({ status, body: payload } = body.action === "rediscover"
+            ? (() => { const r = dossierEngine!.rediscover(id); if (r.ok) dossierEngine!.kick(id); return { status: r.ok ? 200 : 409, body: { ok: r.ok, ...(r.reason ? { error: r.reason } : {}) } }; })()
+            : await dossierEngine.applyAction(id, body));
         } else if (method === "GET" && url.startsWith("/api/atlas/dossiers/")) {
           const id = decodeURIComponent(url.slice("/api/atlas/dossiers/".length));
           const found = /^[A-Za-z0-9_-]{1,80}$/.test(id) ? readDossier(atlasPipeline.deps, id) : null;
@@ -580,7 +596,7 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       if (multimodalEnabled && providers?.workforce) {
         pipelineDeps.multimodalIntelligence = new MultimodalIntelligenceService(providers.workforce);
       }
-      const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: defaultWorkforceConfig, ledger, orchestrator });
+      const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: withWorkforceRouting(defaultWorkforceConfig, Boolean(providers?.workforce) && executionEnabled), ledger, orchestrator });
       const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled });
       pipelineDeps.onMissionCreated = (task) => runner.autoExecute(task);
       // Autonomy layer (Objectives 4-10): lifecycles, approvals, loop, observability. The loop itself starts only when ATLAS_AUTONOMY_ENABLED=true.
@@ -599,7 +615,12 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       const execute = createInternalExecutor({ pipeline: pipelineDeps.store, collectors: pipelineDeps.collectors ?? [], missionQueue: pipelineDeps.missionQueue, lifecycle, dispatcher: orchestrator, prospects, delivery, revenue });
       const cycleDeps = { policy: defaultAutonomyPolicy, lifecycle, pipeline: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, ledger, execute, metricInputs, persistenceHealthy: () => persistence?.health().ok ?? true };
       const searchProvider = new TavilyWebDiscoveryProvider();
-      dossierEngine = new DossierEngine({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 5 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })) });
+      dossierEngine = new DossierEngine({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 6 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })),
+        fetchDoc: safeFetch,
+        analyzeImage: pipelineDeps.multimodalIntelligence ? async (businessId, img) => {
+          const r = await pipelineDeps!.multimodalIntelligence!.analyze({ businessId, sourceType: "image", sourceReference: img.url, mimeType: img.mimeType, dataUrl: img.dataUrl });
+          return { status: r.status, observations: r.observations.map((o) => ({ observation: o.observation, category: o.category, confidence: o.confidence })), generatedBy: "workforce:vision_employee" };
+        } : undefined });
       const engine = dossierEngine;
       const autonomyScheduler = new AutonomyScheduler(async (trigger) => { const c = await runAutonomyCycle(cycleDeps, trigger); if (trigger === "scheduled") await engine.tick(3).catch((e) => console.error(`[atlas-dossier] tick error: ${e instanceof Error ? e.message : "unknown"}`)); await persistence?.flush(); return c; }, (e) => console.error(`[atlas-autonomy] cycle error: ${e instanceof Error ? e.message : "unknown"}`));
       const autonomyEnabled = process.env.ATLAS_AUTONOMY_ENABLED === "true";

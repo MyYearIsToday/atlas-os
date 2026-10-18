@@ -64,7 +64,7 @@ export async function runAiJob(
     // (timeout, missing key, bad response) also normalizes to "UNKNOWN"
     // confidence and must never be accepted through this path.
     if (!result.failed && confidence === "UNKNOWN" && config.acceptUnknownConfidenceOnSuccess) {
-      const costRecord = buildCostRecord(result, decision.model, result.usage.promptTokens, result.usage.completionTokens, request.workerRole, request.lineageId);
+      const costRecord = buildCostRecord(result, result.model || decision.model, result.usage.promptTokens, result.usage.completionTokens, request.workerRole, request.lineageId);
       return { result, costRecord, escalations: state.totalEscalations, finalTierIndex: decision.tierIndex };
     }
 
