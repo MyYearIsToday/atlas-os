@@ -360,6 +360,16 @@ export function createAiProxyServer(
         return;
       }
 
+      if (method === "GET" && url === "/api/atlas/backup") {
+        // Read-only logical export of the whole Atlas database. Gateway-protected like every Atlas route; never contains env/secrets.
+        const p = atlasPipeline?.persistence;
+        if (!p?.backup) { sendJson(res, 503, { error: { code: "unavailable", message: "Backup needs the PostgreSQL store" } }); logRequest(method, url, 503, Date.now() - started); return; }
+        sendJson(res, 200, await p.backup());
+        console.log("[atlas-backup] exported");
+        logRequest(method, url, 200, Date.now() - started);
+        return;
+      }
+
       if (method === "GET" && url === "/api/atlas/businesses") {
         if (!atlasPipeline) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline is not enabled" } }); logRequest(method, url, 503, Date.now() - started); return; }
         const { deps, autonomy } = atlasPipeline;
