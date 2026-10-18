@@ -53,6 +53,10 @@ test("real MissionRunner/Workforce runs every dossier stage; results persist on 
 
   const engine = new DossierEngine({ store: deps.store, missionQueue: deps.missionQueue, runner, search: async () => [{ title: "Joe's Cafe Accra", url: "https://example.com/joes", snippet: "coffee shop" }], retryCooldownMs: 0 });
   engine.ensure(business); engine.kick(id); await engine.idle();
+  assert.equal(engine.get(id)!.status, "awaiting_sources", "research waits for the operator before any AI stage");
+  assert.equal(deps.missionQueue.getSnapshot().filter((m) => m.missionType === "dossier_profile").length, 0);
+  for (const src of engine.get(id)!.sources.filter((u) => u.decision === "pending")) await engine.applyAction(id, { action: "decide", sourceId: src.id, decision: "approved" });
+  await engine.applyAction(id, { action: "approve" }); await engine.idle();
 
   const d = engine.get(id)!;
   assert.equal(d.status, "completed");

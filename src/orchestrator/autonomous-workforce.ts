@@ -98,6 +98,19 @@ function nextMissionLineage(taskId: string): string {
   return `mission-${taskId}-${Date.now()}-${executionCounter}`;
 }
 
+/**
+ * Which kind of thinking a mission needs. Used only by the Workforce router (employee/model selection); other providers ignore it.
+ * Evidence evaluation and strategy go to the strongest reasoning employee, simple extraction stays on the cheaper research employee.
+ */
+export const MISSION_TASK_TYPE: Record<string, string> = {
+  dossier_profile: "research",
+  dossier_audit: "business_analysis",
+  dossier_swot: "long_reasoning",
+  dossier_growth: "long_reasoning",
+  dossier_plan: "long_reasoning",
+  dossier_followup: "research",
+};
+
 function isProviderSuccess(result: AIProviderResult): result is AIProviderSuccess {
   return result.failed === false;
 }
@@ -235,8 +248,10 @@ export class AutonomousWorkforce {
         assignedAI: task.assignedAI,
       }, lineageId, `${lineageId}:started:${attempt}`);
 
+      const taskType = task.missionType ? MISSION_TASK_TYPE[task.missionType] : undefined;
       const request: AIJobRequest = {
         workerRole,
+        ...(taskType ? { taskType } : {}),
         task: `${task.title}\n\n${task.description}`,
         priority: priorityValue[task.priority],
         confidenceTarget: this.options.workforceConfig.escalationConfidenceThreshold,

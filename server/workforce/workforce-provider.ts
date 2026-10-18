@@ -21,6 +21,19 @@ export const ROLE_TO_EMPLOYEE: Partial<Record<WorkerRole, EmployeeId>> = {
   // finance intentionally absent: Finance data is never sent to free-tier workers.
 };
 
+/**
+ * The deployed orchestrator routed every mission to the plain "openrouter" provider with its single default model, so the
+ * Workforce employees (and their stronger models and fallbacks) were never used. This puts the registered "workforce" provider
+ * first for every role it can serve, keeping the previous providers as ordered fallbacks. Finance is untouched (it is never
+ * sent to free workforce models). Pure: returns a new config.
+ */
+export function withWorkforceRouting<C extends { workerProviderMap: Record<string, string[]> }>(config: C, workforceAvailable: boolean): C {
+  if (!workforceAvailable) return config;
+  const map: Record<string, string[]> = {};
+  for (const [role, order] of Object.entries(config.workerProviderMap)) map[role] = role === "finance" ? order : ["workforce", ...order.filter((p) => p !== "workforce")];
+  return { ...config, workerProviderMap: map };
+}
+
 export interface WorkforceMeta {
   employee: string;
   routedBy: string;
