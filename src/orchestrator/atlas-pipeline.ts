@@ -307,7 +307,7 @@ export function applyScoringGate(raw: OpportunityScore): ScoringOutcome {
 export const INTERNAL_AUDIT_SUMMARY = "internal_audit_summary";
 
 /** Dossier stage missions (internal AI text work products for one operator-authorised business; never evidence, no external effect). */
-export const DOSSIER_MISSION_TYPES = ["dossier_profile", "dossier_audit", "dossier_swot", "dossier_growth", "dossier_plan"] as const;
+export const DOSSIER_MISSION_TYPES = ["dossier_profile", "dossier_audit", "dossier_competitors", "dossier_market", "dossier_swot", "dossier_growth", "dossier_campaign", "dossier_plan"] as const;
 
 /** Facts handed to the summary mission, built only from Atlas's own stored state. */
 function summaryFacts(business: BusinessIntelligence, outcome: ScoringOutcome, observations: EvidenceRecord[]): string {

@@ -107,6 +107,9 @@ function nextMissionLineage(taskId: string): string {
 export const MISSION_TASK_TYPE: Record<string, string> = {
   dossier_profile: "research",
   dossier_audit: "business_analysis",
+  dossier_competitors: "long_reasoning",
+  dossier_market: "long_reasoning",
+  dossier_campaign: "writing",
   dossier_swot: "long_reasoning",
   dossier_growth: "long_reasoning",
   dossier_plan: "long_reasoning",

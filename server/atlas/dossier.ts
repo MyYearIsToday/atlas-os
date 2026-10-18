@@ -44,14 +44,18 @@ const AGENTS = new Set(["scout", "builder", "operator", "closer"]); // never "fi
 const MAX_STAGE_ATTEMPTS = 3;
 const MAX_FOLLOW_UPS = 5;
 
-interface StageDef { id: StageId; missionType?: string; assignedAI?: "scout" | "builder" | "operator"; title: string; dependsOn: StageId[] }
+interface StageDef { id: StageId; missionType?: string; assignedAI?: "scout" | "builder" | "operator" | "closer"; title: string; dependsOn: StageId[] }
 export const STAGES: StageDef[] = [
   { id: "research", title: "Online presence research", dependsOn: [] },
   { id: "profile", missionType: "dossier_profile", assignedAI: "scout", title: "Business profile", dependsOn: ["research"] },
-  { id: "audit", missionType: "dossier_audit", assignedAI: "builder", title: "Brand and digital presence audit", dependsOn: ["profile"] },
-  { id: "swot", missionType: "dossier_swot", assignedAI: "builder", title: "SWOT analysis", dependsOn: ["audit"] },
-  { id: "growth", missionType: "dossier_growth", assignedAI: "operator", title: "Growth opportunities", dependsOn: ["swot"] },
-  { id: "plan", missionType: "dossier_plan", assignedAI: "operator", title: "Action plan and follow-ups", dependsOn: ["growth"] },
+  { id: "audit", missionType: "dossier_audit", assignedAI: "builder", title: "Situation and digital presence audit", dependsOn: ["profile"] },
+  { id: "competitor_discovery", title: "Competitor discovery", dependsOn: ["audit"] },
+  { id: "competitors", missionType: "dossier_competitors", assignedAI: "scout", title: "Competitor analysis", dependsOn: ["competitor_discovery"] },
+  { id: "market", missionType: "dossier_market", assignedAI: "builder", title: "Market and audience analysis", dependsOn: ["competitors"] },
+  { id: "swot", missionType: "dossier_swot", assignedAI: "builder", title: "SWOT analysis", dependsOn: ["market"] },
+  { id: "growth", missionType: "dossier_growth", assignedAI: "operator", title: "Strategic opportunities and recommendations", dependsOn: ["swot"] },
+  { id: "campaign", missionType: "dossier_campaign", assignedAI: "closer", title: "Campaign plan and content drafts", dependsOn: ["growth"] },
+  { id: "plan", missionType: "dossier_plan", assignedAI: "operator", title: "Action plan and follow-ups", dependsOn: ["campaign"] },
 ];
 const stageDef = (id: StageId) => STAGES.find((s) => s.id === id)!;
 
@@ -119,7 +123,7 @@ export function parseStageOutput(stage: StageId, text: string, evidence: Evidenc
         const title = clip(x?.title, 160);
         if (!title) return null;
         const area = ["positioning", "visibility", "content", "social", "reputation", "acquisition"].includes(String(x?.area)) ? x.area : "other";
-        return { title, area, rationale: clip(x?.rationale, 500), priority: ["high", "medium", "low"].includes(String(x?.priority)) ? x.priority : "medium", effort: clip(x?.effort, 80) || "unknown", currentSituation: clip(x?.currentSituation, 300) || "not established from approved sources", intendedOutcome: clip(x?.intendedOutcome, 300) || "not stated", successMetric: clip(x?.successMetric, 200) || "not stated", kind: String(x?.kind) === "experiment" ? "experiment" : "finding-based", basis: it?.basis ?? "hypothesis", sourceRefs: it?.sourceRefs ?? [], ...(it?.quote ? { quote: it.quote } : {}), ...(it?.note ? { note: it.note } : {}) };
+        return { title, area, rationale: clip(x?.rationale, 500), priority: ["high", "medium", "low"].includes(String(x?.priority)) ? x.priority : "medium", effort: clip(x?.effort, 80) || "unknown", currentSituation: clip(x?.currentSituation, 300) || "not established from approved sources", intendedOutcome: clip(x?.intendedOutcome, 300) || "not stated", successMetric: clip(x?.successMetric, 200) || "not stated", dependencies: strs(x?.dependencies, 5, 160), risks: strs(x?.risks, 5, 160), nextSteps: strs(x?.nextSteps, 6, 200), kind: String(x?.kind) === "experiment" ? "experiment" : "finding-based", basis: it?.basis ?? "hypothesis", sourceRefs: it?.sourceRefs ?? [], ...(it?.quote ? { quote: it.quote } : {}), ...(it?.note ? { note: it.note } : {}) };
       }).filter(Boolean);
       if (!recs.length) throw new Error("no growth recommendations");
       return { recommendations: recs };
@@ -134,6 +138,33 @@ export function parseStageOutput(stage: StageId, text: string, evidence: Evidenc
         return { title, description: clip(x?.description, 600), assignedAI: AGENTS.has(wanted) ? wanted : "operator", external: x?.external === true };
       }).filter(Boolean);
       return { summary: clip(o.dossierSummary ?? o.summary, 1200), actionPlan, followUps, limitations: strs(o.limitations) };
+    }
+    case "competitors": {
+      const shortlist = (Array.isArray(o.shortlist) ? o.shortlist : []).slice(0, 8).map((c) => {
+        const x = c as Record<string, unknown>;
+        const refs = (Array.isArray(x?.sourceRefs) ? (x.sourceRefs as unknown[]) : []).map(String).filter((r) => validRefs.refs.has(r));
+        const name = clip(x?.name, 120);
+        if (!name || !refs.length) return null; // a competitor must rest on at least one approved competitor source: never invented
+        const one = (v: unknown) => items([{ ...(typeof v === "object" && v ? v as object : { text: v }), sourceRefs: (v as { sourceRefs?: unknown })?.sourceRefs ?? refs }], validRefs, 1)[0] ?? null;
+        return { name, url: clip(x?.url, 300), type: String(x?.type) === "indirect" ? "indirect" : "direct", whySelected: clip(x?.whySelected, 300), sourceRefs: refs, positioning: one(x?.positioning), offerings: strs(x?.offerings, 8, 160), pricing: one(x?.pricing), strengths: items(x?.strengths, validRefs, 5), weaknesses: items(x?.weaknesses, validRefs, 5), digitalPresence: one(x?.digitalPresence), reputation: one(x?.reputation) };
+      }).filter(Boolean);
+      return { shortlist, whitespace: items(o.whitespace, validRefs, 6), threats: items(o.threats, validRefs, 6), gaps: strs(o.gaps, 10, 240), conflicts: strs(o.conflicts, 8, 300), method: clip(o.method, 400) };
+    }
+    case "market": {
+      const out = { audience: items(o.audience, validRefs, 8), localContext: items(o.localContext, validRefs, 8), trends: items(o.trends, validRefs, 8),
+        opportunities: (Array.isArray(o.opportunities) ? o.opportunities : []).slice(0, 8).map((r) => { const x = r as Record<string, unknown>; const it = items([{ text: x?.rationale ?? x?.title, basis: x?.basis, sourceRefs: x?.sourceRefs, quote: x?.quote }], validRefs, 1)[0]; const title = clip(x?.title, 160); return title ? { title, rationale: clip(x?.rationale, 400), constraints: clip(x?.constraints, 240), basis: it?.basis ?? "hypothesis", sourceRefs: it?.sourceRefs ?? [], ...(it?.quote ? { quote: it.quote } : {}), ...(it?.note ? { note: it.note } : {}) } : null; }).filter(Boolean),
+        threats: items(o.threats, validRefs, 6), barriers: items(o.barriers, validRefs, 6), unknowns: strs(o.unknowns, 10, 240),
+        // an estimate is kept only if it names its method, uncertainty and at least one approved source
+        estimates: (Array.isArray(o.estimates) ? o.estimates : []).slice(0, 4).map((e) => { const x = e as Record<string, unknown>; const refs = (Array.isArray(x?.sourceRefs) ? x.sourceRefs : []).map(String).filter((r) => validRefs.refs.has(r)); return clip(x?.description, 240) && clip(x?.method, 300) && clip(x?.uncertainty, 240) && refs.length ? { description: clip(x.description, 240), method: clip(x.method, 300), uncertainty: clip(x.uncertainty, 240), sourceRefs: refs } : null; }).filter(Boolean) };
+      if (!out.audience.length && !out.trends.length && !out.opportunities.length && !out.unknowns.length) throw new Error("market analysis is empty");
+      return out;
+    }
+    case "campaign": {
+      const list = (v: unknown, n: number) => (Array.isArray(v) ? v.slice(0, n) : []) as Array<Record<string, unknown>>;
+      const campaigns = list(o.campaigns, 4).map((c) => { const name = clip(c?.name, 120); if (!name) return null; return { name, objective: clip(c?.objective, 300), audience: clip(c?.audience, 200), message: clip(c?.message, 400), callToAction: clip(c?.callToAction, 160), channels: strs(c?.channels, 5, 60), kpis: list(c?.kpis, 5).map((k) => ({ metric: clip(k?.metric, 120), measurement: clip(k?.measurement, 240), baseline: clip(k?.baseline, 200) || "unknown: establish before the campaign", target: "configurable by the operator" })).filter((k) => k.metric), dependencies: strs(c?.dependencies, 5, 160), assumptions: strs(c?.assumptions, 5, 160), risks: strs(c?.risks, 5, 160), basis: ["verified", "hypothesis"].includes(String(c?.basis)) ? "hypothesis" : "hypothesis", sourceRefs: (Array.isArray(c?.sourceRefs) ? c.sourceRefs : []).map(String).filter((r) => validRefs.refs.has(r)) }; }).filter(Boolean);
+      if (!campaigns.length) throw new Error("no campaign plan");
+      const content = list(o.content, 12).map((c) => ({ platform: clip(c?.platform, 40), format: clip(c?.format, 60), draft: clip(c?.draft, 800), callToAction: clip(c?.callToAction, 160), creativeBrief: clip(c?.creativeBrief, 500), campaign: clip(c?.campaign, 120), status: "internal draft: not published" })).filter((c) => c.platform && c.draft);
+      return { objective: clip(o.objective, 400), pillars: list(o.pillars, 6).map((x) => ({ name: clip(x?.name, 100), rationale: clip(x?.rationale, 300) })).filter((x) => x.name), channels: list(o.channels, 6).map((x) => ({ channel: clip(x?.channel, 60), why: clip(x?.why, 300), constraints: clip(x?.constraints, 200) })).filter((x) => x.channel), campaigns, sequence: list(o.sequence, 12).map((x, i) => ({ order: i + 1, activity: clip(x?.activity, 200), dependsOn: clip(x?.dependsOn, 160) })).filter((x) => x.activity), content, assumptions: strs(o.assumptions, 8, 200) };
     }
     default: throw new Error(`stage ${stage} has no parser`);
   }
@@ -151,11 +182,14 @@ const PREAMBLE = [
   "Respond with ONE JSON object only, no prose, no markdown fences.",
 ].join("\n");
 
-const SPEC: Record<Exclude<StageId, "research">, string> = {
+const SPEC: Record<Exclude<StageId, "research" | "competitor_discovery">, string> = {
   profile: `JSON keys: name, industry, productsServices[string], location, targetAudience, website, socialAccounts[{platform,url}] (only accounts listed in approved sources), brandNotes, facts[{claim,basis,sourceRefs[string],quote,confidence:"high|medium|low"}], unknowns[string]. Use "unknown" for missing values.`,
   audit: `JSON keys: summary(string), strengths[], weaknesses[], gaps[], improvementOpportunities[] where each item is {text,basis,sourceRefs[string],quote}. Cover positioning, website and search visibility, social presence, reputation, content and partnerships ONLY as far as the approved sources show; for each area with no evidence write an "unknown" item stating what is missing. Include the visual brand assets section below if any were confirmed.`,
+  competitors: `JSON keys: shortlist[{name,url,type:"direct|indirect",whySelected,sourceRefs[string],positioning,offerings[string],pricing,strengths[],weaknesses[],digitalPresence,reputation}] where positioning/pricing/digitalPresence/reputation and each strength/weakness are {text,basis,sourceRefs[string],quote}, whitespace[], threats[] (items), gaps[string] (what could NOT be established for each competitor: say "not found in the approved sources", never "does not exist"), conflicts[string] (conflicting evidence, kept visible), method(string: how competitors were chosen). ONLY competitors present in the APPROVED COMPETITOR SOURCES may appear, each citing their source ids. Pricing only if a source states it; otherwise omit and list it under gaps. Direct = same offer for the same customers; indirect = different offer serving the same need.`,
+  market: `JSON keys: audience[], localContext[], trends[], threats[], barriers[] (items {text,basis,sourceRefs[string],quote}), opportunities[{title,rationale,constraints,basis,sourceRefs[string],quote}], estimates[{description,method,uncertainty,sourceRefs[string]}] (ONLY if an approved source supports it; otherwise an empty array), unknowns[string]. Consider Ghana-specific context (locations, mobile-first and social-led discovery, realistic budgets, businesses with limited digital infrastructure) only where the sources or the business record support it; never rely on stereotypes. No market sizes, demographics or prices unless a source states them.`,
+  campaign: `JSON keys: objective(string), pillars[{name,rationale}], channels[{channel,why,constraints}] (match the business's apparent resources and digital maturity), campaigns[{name,objective,audience,message,callToAction,channels[string],kpis[{metric,measurement,baseline}],dependencies[string],assumptions[string],risks[string],sourceRefs[string]}] (max 4), sequence[{activity,dependsOn}] (order by dependency, NO calendar dates), content[{campaign,platform,format,draft,callToAction,creativeBrief}] (internal drafts only, specific to this business and its evidence, no invented offers, prices, awards or testimonials), assumptions[string]. Baselines are "unknown" unless a source gives them; targets are set later by the operator.`,
   swot: `JSON keys: strengths[], weaknesses[], opportunities[], threats[] where each item is {text,basis,sourceRefs[string],quote}. Separate verified findings from hypotheses and list unknowns as basis "unknown". Threats and competitors must be specific to this business's evidence, never generic.`,
-  growth: `JSON key: recommendations[{title,area:"positioning|visibility|content|social|reputation|acquisition",kind:"finding-based|experiment",currentSituation,rationale,priority:"high|medium|low",effort,intendedOutcome,successMetric,basis,sourceRefs[string],quote}]. First state currentSituation from approved sources; do not default to "build a website / improve SEO / post more" without checking what already exists. Mark kind "experiment" for proposals that test a hypothesis. successMetric must be measurable but must not contain invented baseline numbers.`,
+  growth: `JSON key: recommendations[{title,area:"positioning|visibility|content|social|reputation|acquisition",kind:"finding-based|experiment",currentSituation,rationale,priority:"high|medium|low",effort,intendedOutcome,successMetric,dependencies[string],risks[string],nextSteps[string],basis,sourceRefs[string],quote}]. Use the competitor and market analysis above. First state currentSituation from approved sources; do not default to "build a website / improve SEO / post more" without checking what already exists. Mark kind "experiment" for proposals that test a hypothesis. successMetric must be measurable but must not contain invented baseline numbers.`,
   plan: `JSON keys: dossierSummary(string, <=6 sentences), actionPlan[{title,description,owner,timeframe,dependencies[string],assumptions[string]}], followUps[{title,description,assignedAI:"scout|builder|operator|closer",external:boolean}] (max ${MAX_FOLLOW_UPS}; set external:true for anything that would contact, publish or spend), limitations[string] (missing data, unavailable sources). Timeframes must be tied to scope and dependencies and state assumptions; otherwise use "unspecified". No arbitrary dates.`,
 };
 
@@ -163,13 +197,14 @@ function contextBlock(b: BusinessIntelligence, d: Dossier, store: PipelineStore,
   const record = [`Name: ${b.canonicalName}`, `Category: ${b.category ?? "unknown"}`, `Address: ${b.address ?? "unknown"}`, `Website: ${b.website ?? "none on record"}`, `Phone: ${b.phone ?? "none on record"}`].join("\n");
   const observed = (store.observations.get(b.id) ?? []).slice(0, 25).map((o) => `- ${o.field} = ${clip(typeof o.value === "string" ? o.value : JSON.stringify(o.value), 160)} [${o.observability}${o.sourceUrl ? `, ${o.sourceUrl}` : ""}]`).join("\n") || "none";
   const score = store.scores.get(b.id);
-  const approved = d.sources.filter((s) => s.decision === "approved");
+  const approved = d.sources.filter((s) => s.decision === "approved" && s.role !== "competitor");
+  const comp = d.sources.filter((s) => s.decision === "approved" && s.role === "competitor").slice(0, 8).map((s) => `[${s.id}] COMPETITOR CANDIDATE — ${clip(s.title, 120)} — ${s.url}\n    PAGE TEXT: ${s.pageText ? `"${clip(s.pageText, 1500)}"` : "NOT READ: nothing can be verified from this source"}`).join("\n");
   const sources = approved.map((s) => `[${s.id}] ${s.official ? "OFFICIAL " : ""}${s.kind ?? "other"} — ${clip(s.title, 120)} — ${s.url}\n    search snippet (not evidence): ${clip(s.snippet, 250) || "none"}\n    PAGE TEXT: ${s.pageText ? `"${clip(s.pageText, 2200)}"` : "NOT READ (page could not be fetched): nothing can be verified from this source"}`).join("\n") || "none approved: every claim must be hypothesis or unknown; state which sources are needed";
   const confirmed = (d.images ?? []).filter((i) => i.decision === "confirmed");
   const visual = confirmed.map((i) => `[${i.id}] ${i.role} from ${i.pageUrl} (${i.url}) — ${i.analysis ? (i.analysis.status === "analyzed" ? i.analysis.observations.map((o) => `${o.category}: ${o.observation} (${o.confidence})`).join("; ") || "analysed, no observations" : `not analysed: ${i.analysis.reason ?? i.analysis.status}`) : "not analysed"}`).join("\n");
-  const prior = STAGES.filter((s) => s.id !== "research" && STAGES.findIndex((x) => x.id === s.id) < STAGES.findIndex((x) => x.id === upTo) && d.stages[s.id].output)
+  const prior = STAGES.filter((s) => s.id !== "research" && s.id !== "competitor_discovery" && STAGES.findIndex((x) => x.id === s.id) < STAGES.findIndex((x) => x.id === upTo) && d.stages[s.id].output)
     .map((s) => `## ${s.title} (already produced)\n${clip(JSON.stringify(d.stages[s.id].output), 3500)}`).join("\n\n");
-  return [`--- BUSINESS RECORD ---\n${record}`, `--- OBSERVED EVIDENCE (collected by Atlas) ---\n${observed}`, `--- OPPORTUNITY SCORE ---\n${score ? (score.overallScore === null ? "withheld: not enough observed evidence (do not estimate one)" : String(score.overallScore)) : "not calculated"}`, `--- APPROVED SOURCES (operator-approved; the only citable sources) ---\n${sources}`, ...(visual ? [`--- OPERATOR-CONFIRMED VISUAL BRAND ASSETS (cite as image ids; observations are unverified) ---\n${visual}`] : []), ...(prior ? [`--- PRIOR STAGES ---\n${prior}`] : []), `--- LIMITATIONS SO FAR ---\n${d.limitations.join("; ") || "none recorded"}`].join("\n\n");
+  return [`--- BUSINESS RECORD ---\n${record}`, `--- OBSERVED EVIDENCE (collected by Atlas) ---\n${observed}`, `--- OPPORTUNITY SCORE ---\n${score ? (score.overallScore === null ? "withheld: not enough observed evidence (do not estimate one)" : String(score.overallScore)) : "not calculated"}`, `--- APPROVED SOURCES (operator-approved; the only citable sources) ---\n${sources}`, ...(comp && !["profile", "audit"].includes(upTo) ? [`--- APPROVED COMPETITOR SOURCES (operator-approved; other businesses, never attribute their facts to this business) ---\n${comp}`] : []), ...(visual ? [`--- OPERATOR-CONFIRMED VISUAL BRAND ASSETS (cite as image ids; observations are unverified) ---\n${visual}`] : []), ...(prior ? [`--- PRIOR STAGES ---\n${prior}`] : []), `--- LIMITATIONS SO FAR ---\n${d.limitations.join("; ") || "none recorded"}`].join("\n\n");
 }
 
 /** Read-only context handed to approved non-stage missions: the same approved-source evidence the dossier stages use. */
@@ -188,7 +223,12 @@ export class DossierEngine {
   private now() { return (this.d.now ?? (() => new Date().toISOString()))(); }
   private save(x: Dossier) { x.updatedAt = this.now(); this.d.store.dossiers.set(x.businessId, x); }
 
-  get(businessId: string): Dossier | undefined { return this.d.store.dossiers.get(businessId); }
+  get(businessId: string): Dossier | undefined {
+    const x = this.d.store.dossiers.get(businessId);
+    // Dossiers saved before newer stages existed gain the new (pending) stages; nothing already produced is touched.
+    if (x) for (const s of STAGES) if (!x.stages[s.id]) x.stages[s.id] = emptyStage();
+    return x;
+  }
 
   /** Idempotent: one dossier per business, ever. */
   ensure(b: BusinessIntelligence): Dossier {
@@ -209,7 +249,7 @@ export class DossierEngine {
     if (x.manualRetries >= 3) return { ok: false, reason: "manual retry limit reached" };
     x.manualRetries++;
     for (const s of stuck) { const st = x.stages[s.id]; st.status = "pending"; st.attempts = Math.min(st.attempts, MAX_STAGE_ATTEMPTS - 1); st.error = null; st.lastAttemptAt = null; if (st.output === null && st.taskId) { const t = this.d.missionQueue.getSnapshot().find((m) => m.taskId === st.taskId); if (t?.status === "Failed") st.taskId = null; } }
-    x.status = this.sourcesApproved(x) || x.stages.research.status !== "completed" ? "active" : "awaiting_sources";
+    x.status = (this.sourcesApproved(x) || x.stages.research.status !== "completed") && x.competitorApproval?.status !== "awaiting" ? "active" : "awaiting_sources";
     this.save(x);
     return { ok: true };
   }
@@ -247,6 +287,7 @@ export class DossierEngine {
       if (st.status === "completed") continue;
       if (!s.dependsOn.every((dep) => x.stages[dep].status === "completed")) return null; // blocked behind an earlier stage
       if (s.id !== "research" && !this.sourcesApproved(x)) return null; // operator source-approval checkpoint
+      if (s.id === "competitors" && x.competitorApproval?.status !== "approved") return null; // operator competitor checkpoint
       if (st.status === "blocked") return null;
       if (st.status === "failed" && st.lastAttemptAt && Date.parse(this.now()) - Date.parse(st.lastAttemptAt) < cooldown) return null;
       return s;
@@ -270,6 +311,7 @@ export class DossierEngine {
     if (STAGES.every((s) => x.stages[s.id].status === "completed")) x.status = "completed";
     else if (STAGES.some((s) => x.stages[s.id].status === "blocked")) x.status = "blocked";
     else if (x.stages.research.status === "completed" && !this.sourcesApproved(x)) x.status = "awaiting_sources";
+    else if (x.stages.competitor_discovery.status === "completed" && x.competitorApproval?.status === "awaiting") x.status = "awaiting_sources";
     else x.status = "active";
     this.save(x);
   }
@@ -280,6 +322,7 @@ export class DossierEngine {
     this.save(x);
     try {
       if (s.id === "research") await this.research(b, x, st);
+      else if (s.id === "competitor_discovery") await this.discoverCompetitors(b, x, st);
       else await this.aiStage(b, x, s, st);
     } catch (e) {
       st.status = "failed"; st.error = clip(e instanceof Error ? e.message : e, 300); st.attempts++;
@@ -347,6 +390,47 @@ export class DossierEngine {
     st.status = "completed"; st.completedAt = this.now(); st.generatedBy = "atlas/server (source discovery + page reads; no AI model)";
   }
 
+  /**
+   * Finds CANDIDATE competitors (other businesses serving the same need) from public search, reads their pages, and stops for
+   * operator approval. A candidate is never analysed until approved, and nothing is concluded about a business that was not found.
+   */
+  private async discoverCompetitors(b: BusinessIntelligence, x: Dossier, st: StageRecord) {
+    const profile = x.stages.profile.output as { industry?: string; location?: string } | null;
+    const kind = clip(profile?.industry && profile.industry !== "unknown" ? profile.industry : b.category, 80);
+    const place = clip(profile?.location && profile.location !== "unknown" ? profile.location : b.address, 80) || "Ghana";
+    const queries = kind ? [`best ${kind} in ${place}`, `${kind} services ${place}`, `"${b.canonicalName}" competitors alternatives`, `${kind} prices ${place}`] : [`"${b.canonicalName}" competitors alternatives`];
+    const own = b.website ? normalizeUrl(b.website).split("/")[0] : "";
+    const byKey = new Set(x.sources.map((u) => normalizeUrl(u.url)));
+    const nextId = () => `S${Math.max(0, ...x.sources.map((u) => Number(u.id.slice(1)) || 0)) + 1}`;
+    let status: "ok" | "not_configured" | "failed" = this.d.search ? "ok" : "not_configured"; let error: string | undefined;
+    if (this.d.search) for (const q of queries) {
+      try {
+        for (const r of (await this.d.search(q)).slice(0, 8)) {
+          const key = normalizeUrl(r.url);
+          if (!r.url || byKey.has(key) || (own && key.split("/")[0] === own) || x.sources.filter((u) => u.role === "competitor").length >= 10) continue;
+          // the business's own pages and namesakes of it are not competitors
+          if (scoreRelevance({ name: b.canonicalName, address: b.address, website: b.website, phone: b.phone }, { url: r.url, title: r.title, snippet: r.snippet }).relevance === "match") continue;
+          byKey.add(key);
+          x.sources.push({ id: nextId(), url: clip(r.url, 400), title: clip(r.title, 200) || clip(r.url, 100), snippet: clip(r.snippet, 500), query: q, retrievedAt: this.now(), confidence: "unverified", kind: classifySource(r.url, b.website), relevance: "possible", reasons: [`surfaced by the search "${q}"; relevance as a competitor is for the operator to judge`], decision: "pending", official: false, origin: "search", role: "competitor", check: { status: "not_checked" } });
+        }
+      } catch (e) { status = "failed"; error = (e as { code?: string }).code ?? "error"; }
+    }
+    let read = 0; const failed = new Map<string, number>();
+    if (this.d.fetchDoc) for (const src of x.sources.filter((u) => u.role === "competitor" && u.check?.status === "not_checked").slice(0, 8)) {
+      const doc = await this.d.fetchDoc(src.url);
+      if (!doc.ok || !doc.body) { src.check = { status: "failed", at: this.now(), reason: doc.reason ?? "unreadable" }; failed.set(doc.reason ?? "unreadable", (failed.get(doc.reason ?? "unreadable") ?? 0) + 1); continue; }
+      read++; src.pageText = clip(htmlToText(doc.body), 6000); src.confidence = "checked"; src.check = { status: "fetched", at: this.now() };
+    }
+    const found = x.sources.filter((u) => u.role === "competitor").length;
+    const note = (m: string) => { if (!x.limitations.includes(m)) x.limitations.push(m); };
+    if (status !== "ok") note(`Competitor search ${status === "failed" ? `failed (${error})` : "is not configured"}: no competitor candidates could be found automatically. Add competitor URLs yourself.`);
+    else if (!found) note("No competitor candidates were found by the searches used (" + queries.length + " queries). This does not prove there are none; add known competitors manually.");
+    if (failed.size) note(`Some competitor pages could not be read (${[...failed].map(([r, n]) => `${r} x${n}`).join(", ")}); nothing can be verified from them.`);
+    st.output = { queries, searchStatus: status, ...(error ? { error } : {}), candidates: found, pagesRead: read, guidance: found ? "Approve the candidates that are genuinely comparable businesses (direct or indirect), reject the rest, or add competitors you know." : "No candidates were found. Add competitors you know (URL), or continue: the analysis will then say competitors were not established." };
+    x.competitorApproval = x.competitorApproval ?? { status: "awaiting" };
+    st.status = "completed"; st.completedAt = this.now(); st.generatedBy = "atlas/server (competitor search + page reads; no AI model)";
+  }
+
   // ------------------------------------------------------------ operator source / image decisions
 
   /** Operator actions on the checkpoint. Internal only: approving a source never authorises any external communication. */
@@ -372,7 +456,7 @@ export class DossierEngine {
       if (x.sources.some((u) => normalizeUrl(u.url) === key)) return bad("duplicate_source", 409);
       if (x.sources.length >= 30) return bad("too_many_sources");
       const kind = classifySource(url.toString(), b.website);
-      const added: SourceRef = { id: `S${Math.max(0, ...x.sources.map((u) => Number(u.id.slice(1)) || 0)) + 1}`, url: clip(url.toString(), 400), title: clip(body.title, 200) || url.hostname, snippet: "", query: "added by operator", retrievedAt: this.now(), confidence: "unverified", kind: body.kind && ["official_site", "social", "directory", "article", "event", "review", "other"].includes(String(body.kind)) ? body.kind as SourceRef["kind"] : kind, relevance: "match", reasons: [`added by ${actor}`], decision: "approved", official: body.official === true, origin: "operator", check: { status: "not_checked" } };
+      const added: SourceRef = { id: `S${Math.max(0, ...x.sources.map((u) => Number(u.id.slice(1)) || 0)) + 1}`, url: clip(url.toString(), 400), title: clip(body.title, 200) || url.hostname, snippet: "", query: "added by operator", retrievedAt: this.now(), confidence: "unverified", kind: body.kind && ["official_site", "social", "directory", "article", "event", "review", "other"].includes(String(body.kind)) ? body.kind as SourceRef["kind"] : kind, relevance: "match", reasons: [`added by ${actor}`], decision: "approved", official: body.official === true, origin: "operator", ...(body.role === "competitor" ? { role: "competitor" as const } : {}), check: { status: "not_checked" } };
       if (this.d.fetchDoc) {
         const doc = await this.d.fetchDoc(added.url);
         if (doc.ok && doc.body) { added.pageText = clip(htmlToText(doc.body), 6000); added.confidence = "checked"; added.check = { status: "fetched", at: this.now() }; const t = htmlTitle(doc.body); if (t && !body.title) added.title = clip(t, 200);
@@ -381,6 +465,13 @@ export class DossierEngine {
         else added.check = { status: "failed", at: this.now(), reason: doc.reason ?? "unreadable" };
       }
       x.sources.push(added);
+    } else if (action === "approve_competitors") {
+      if (x.stages.competitor_discovery.status !== "completed") return bad("competitor_discovery_not_finished", 409);
+      if (x.competitorApproval?.status === "approved") return { status: 200, body: { ok: true, already: true } };
+      const approved = x.sources.filter((u) => u.role === "competitor" && u.decision === "approved");
+      if (!approved.length) x.limitations.push("The operator continued without approving any competitor source: competitors are reported as not established, not as non-existent.");
+      x.competitorApproval = { status: "approved", approvedAt: this.now(), approvedBy: actor, approvedCount: approved.length };
+      x.status = "active";
     } else if (action === "image") {
       const img = (x.images ?? []).find((i) => i.id === body.imageId);
       if (!img) return bad("unknown_image", 404);
@@ -397,7 +488,7 @@ export class DossierEngine {
     } else return bad("unknown_action");
     this.save(x);
     await this.d.flush?.();
-    if (action === "approve") this.kick(businessId);
+    if (action === "approve" || action === "approve_competitors") this.kick(businessId);
     return { status: 200, body: { ok: true, action, sourceApproval: x.sourceApproval ?? null } };
   }
 
@@ -444,7 +535,7 @@ export class DossierEngine {
       const correction = st.attempts > 0 && st.error ? `\n\nYour previous attempt was rejected: ${st.error}. Return ONLY one valid JSON object that follows the keys exactly.` : "";
       task = await queue.create({
         title: `${s.title} — ${b.canonicalName}`,
-        description: `${PREAMBLE}\n\nTASK: ${s.title}.\n${SPEC[s.id as Exclude<StageId, "research">]}${correction}\n\n${contextBlock(b, x, this.d.store, s.id)}`,
+        description: `${PREAMBLE}\n\nTASK: ${s.title}.\n${SPEC[s.id as Exclude<StageId, "research" | "competitor_discovery">]}${correction}\n\n${contextBlock(b, x, this.d.store, s.id)}`,
         assignedAI: s.assignedAI!, clientId: b.id, priority: "Medium", approvalRequired: "Auto", missionType: s.missionType!, dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
       });
       st.taskId = task.taskId; this.save(x);
