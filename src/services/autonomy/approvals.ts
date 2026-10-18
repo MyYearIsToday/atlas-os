@@ -97,7 +97,7 @@ export class ApprovalService {
     if (!this.d.runMission) throw new LifecycleError("execution_unavailable", "mission execution is not available in this runtime");
     const approvalId = sha("mission", taskId, missionVersion(task), actor);
     const result = await this.d.runMission(taskId, { approvedByHuman: true });
-    if (result.executed && !this.d.lifecycle.approvals.has(approvalId)) {
+    if ((result.executed || result.outcome === "RUNNING") && !this.d.lifecycle.approvals.has(approvalId)) {
       this.d.lifecycle.approvals.set(approvalId, { approvalId, operation: "mission", objectType: "mission", objectId: taskId, objectVersion: missionVersion(task), actor, outcome: "APPROVED", at: this.now(), result });
     }
     return { idempotent: false, result };

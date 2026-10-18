@@ -53,6 +53,8 @@ export interface AutonomousWorkforceOptions {
   maxRetries?: number;
   now?: () => Date;
   executeJob?: MissionJobExecutor;
+  /** Extra, read-only context for a mission (business record, approved evidence, prior stage outputs). */
+  contextProvider?: (task: Task) => string | undefined;
 }
 
 export interface MissionExecutionOptions {
@@ -252,7 +254,7 @@ export class AutonomousWorkforce {
       const request: AIJobRequest = {
         workerRole,
         ...(taskType ? { taskType } : {}),
-        task: `${task.title}\n\n${task.description}`,
+        task: `${task.title}\n\n${task.description}${(() => { const c = this.options.contextProvider?.(task); return c ? `\n\n${c}` : ""; })()}`,
         priority: priorityValue[task.priority],
         confidenceTarget: this.options.workforceConfig.escalationConfidenceThreshold,
         budgetLimitUsd: options.budgetLimitUsd ?? this.options.workforceConfig.dailyCostLimitUsd,

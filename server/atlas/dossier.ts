@@ -172,6 +172,13 @@ function contextBlock(b: BusinessIntelligence, d: Dossier, store: PipelineStore,
   return [`--- BUSINESS RECORD ---\n${record}`, `--- OBSERVED EVIDENCE (collected by Atlas) ---\n${observed}`, `--- OPPORTUNITY SCORE ---\n${score ? (score.overallScore === null ? "withheld: not enough observed evidence (do not estimate one)" : String(score.overallScore)) : "not calculated"}`, `--- APPROVED SOURCES (operator-approved; the only citable sources) ---\n${sources}`, ...(visual ? [`--- OPERATOR-CONFIRMED VISUAL BRAND ASSETS (cite as image ids; observations are unverified) ---\n${visual}`] : []), ...(prior ? [`--- PRIOR STAGES ---\n${prior}`] : []), `--- LIMITATIONS SO FAR ---\n${d.limitations.join("; ") || "none recorded"}`].join("\n\n");
 }
 
+/** Read-only context handed to approved non-stage missions: the same approved-source evidence the dossier stages use. */
+export function missionContext(b: BusinessIntelligence, d: Dossier | undefined, store: PipelineStore): string {
+  const rules = "Write a substantive, specific work product for the operator. Use ONLY the context below. Mark anything not supported by an approved source as a hypothesis or unknown. Never invent facts, metrics, prices or reviews. Nothing is sent, published or spent by this task.";
+  if (!d) return `--- CONTEXT ---\n${rules}\n${[`Name: ${b.canonicalName}`, `Category: ${b.category ?? "unknown"}`, `Address: ${b.address ?? "unknown"}`, `Website: ${b.website ?? "none on record"}`].join("\n")}\nNo dossier or approved sources exist yet.`;
+  return `--- CONTEXT ---\n${rules}\n\n${contextBlock(b, d, store, "plan")}`;
+}
+
 // ------------------------------------------------------------------ engine
 
 export class DossierEngine {

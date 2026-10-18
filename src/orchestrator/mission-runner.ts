@@ -33,12 +33,16 @@ export interface MissionRunnerOptions {
   store: PipelineStore;
   executionEnabled: boolean;
   now?: () => Date;
+  /** Returns a reason when a prerequisite (e.g. source approval) is incomplete; the mission then does not execute. */
+  blockedBy?: (task: Task) => string | null;
+  /** Called after a run settles (success or failure), including runs that outlive the HTTP request. */
+  afterRun?: () => Promise<void>;
 }
 
 export interface MissionRunSummary {
   taskId: string;
   executed: boolean;
-  outcome: MissionRunResult["outcome"] | "DISABLED" | "NOT_FOUND";
+  outcome: MissionRunResult["outcome"] | "DISABLED" | "NOT_FOUND" | "RUNNING";
   reason?: string;
   costUsd?: number;
   completedEventDispatched?: boolean;
@@ -61,7 +65,27 @@ export class MissionRunner {
     }
   }
 
+  private inFlight = new Map<string, Promise<MissionRunSummary>>();
+
+  /** One execution per mission at a time: repeated approvals, retries and scheduler overlap join nothing and start nothing. */
   async run(taskId: string, approval: { approvedByHuman?: boolean; approvedByCeo?: boolean }, mode: { autonomous?: boolean } = {}): Promise<MissionRunSummary> {
+    if (this.inFlight.has(taskId)) return { taskId, executed: false, outcome: "RUNNING", reason: "this mission is already running; no second execution was started" };
+    const p = this.execute(taskId, approval, mode).finally(async () => { this.inFlight.delete(taskId); try { await this.options.afterRun?.(); } catch { /* persistence errors are reported by the persistence layer */ } });
+    this.inFlight.set(taskId, p);
+    return p;
+  }
+
+  /** Starts the run and answers within waitMs. A slower run keeps going on the server; the result is persisted and viewable. */
+  async runBounded(taskId: string, approval: { approvedByHuman?: boolean; approvedByCeo?: boolean }, waitMs = 15_000): Promise<MissionRunSummary> {
+    const started = this.inFlight.has(taskId);
+    const run = this.run(taskId, approval);
+    const timer = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), waitMs));
+    const first = await Promise.race([run, timer]);
+    if (first !== "timeout") return first;
+    return { taskId, executed: false, outcome: "RUNNING", reason: started ? "already running" : "running on the server; open View results to follow it" };
+  }
+
+  private async execute(taskId: string, approval: { approvedByHuman?: boolean; approvedByCeo?: boolean }, mode: { autonomous?: boolean } = {}): Promise<MissionRunSummary> {
     const { store, missionQueue, ledger, dispatcher, workforce } = this.options;
     const task = missionQueue.getSnapshot().find((t) => t.taskId === taskId);
     if (!task) return { taskId, executed: false, outcome: "NOT_FOUND", reason: "Task not found" };
@@ -72,6 +96,11 @@ export class MissionRunner {
     }
     if (mode.autonomous && (task.approvalRequired !== "Auto" || !task.missionType || !AUTONOMOUS_SAFE_MISSION_TYPES.has(task.missionType))) {
       return { taskId, executed: false, outcome: "BLOCKED", reason: "mission is not eligible for autonomous execution" };
+    }
+    const blocker = this.options.blockedBy?.(task);
+    if (blocker) {
+      store.record({ stage: "execution", event: "MissionExecution", businessId: task.clientId, handler: "mission-runner", state: "blocked by dependency", error: blocker });
+      return { taskId, executed: false, outcome: "BLOCKED", reason: blocker };
     }
     if (!this.options.executionEnabled) {
       store.record({ stage: "execution", event: "MissionExecution", businessId: task.clientId, handler: "mission-runner", state: "refused: mission execution is disabled", error: "ATLAS_MISSION_EXECUTION_ENABLED is not true" });
@@ -86,6 +115,13 @@ export class MissionRunner {
     }
 
     const providerResult = result.result && "text" in result.result ? result.result : undefined;
+    if (!providerResult?.text?.trim() || providerResult.text.trim().length < 20) {
+      // "Completed" must mean a real output exists. Nothing usable was produced, so the mission is Failed, not Completed.
+      const reason = "the provider returned no usable output";
+      await missionQueue.update(taskId, { status: "Failed", completedAt: null, lastFailureReason: reason });
+      store.record({ ...base, state: "failed: no usable output", error: reason });
+      return { taskId, executed: false, outcome: "FAILED", reason };
+    }
     if (providerResult) {
       // Model output is a work product, never evidence: it is stored apart and flagged accordingly.
       const wf = (providerResult as { workforce?: { employee?: string; usedFallback?: boolean } }).workforce;
