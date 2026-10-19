@@ -1,7 +1,7 @@
-import type { AutonomousWorkforce, MissionLifecycleDispatcher, MissionRunResult } from "./autonomous-workforce";
+import { MISSION_TASK_TYPE, type AutonomousWorkforce, type MissionLifecycleDispatcher, type MissionRunResult } from "./autonomous-workforce";
 import type { MissionQueueRepository, Task } from "../services/mission-queue";
 import type { OperationalLedger } from "../services/finance/ledger";
-import type { PipelineStore } from "./atlas-pipeline";
+import type { PipelineStore, RoutingRecord } from "./atlas-pipeline";
 import { INTERNAL_AUDIT_SUMMARY, DOSSIER_MISSION_TYPES } from "./atlas-pipeline";
 
 /**
@@ -46,6 +46,26 @@ export interface MissionRunSummary {
   reason?: string;
   costUsd?: number;
   completedEventDispatched?: boolean;
+}
+
+type WfMeta = { employee?: string; routedBy?: string; usedFallback?: boolean; taskType?: string | null; selected?: { providerId: string; model: string } | null; attempts?: Array<{ providerId: string; model: string; outcome: string; status?: number; ms: number }> };
+
+/** Builds the persisted routing record and a label that always names the model that ACTUALLY answered. */
+export function describeRouting(r: { provider: string; model: string }, taskType: string | null): { label: string; record: RoutingRecord } {
+  const x = r as unknown as { workforce?: WfMeta; routing?: { trail?: Array<{ tier: number; providerId: string; ok: boolean; model?: string; code?: string; reason?: string }> } };
+  const wf = x.workforce;
+  const attempts = (wf?.attempts ?? []).map((a) => ({ provider: a.providerId, model: a.model, outcome: a.outcome, ...(a.status ? { status: a.status } : {}), ms: a.ms }));
+  const failed = attempts.filter((a) => a.outcome !== "ok");
+  const record: RoutingRecord = {
+    taskType: wf?.taskType ?? taskType, employee: wf?.employee ?? null, routedBy: wf?.routedBy ?? null,
+    selected: wf?.selected ? { provider: wf.selected.providerId, model: wf.selected.model } : null,
+    actual: { provider: r.provider, model: r.model }, usedFallback: Boolean(wf?.usedFallback) || (x.routing?.trail ?? []).some((t) => !t.ok),
+    succeeded: true, attempts,
+    tiers: (x.routing?.trail ?? []).map((t) => ({ tier: t.tier, provider: t.providerId, ok: t.ok, ...(t.model ? { model: t.model } : {}), ...(t.code ? { code: t.code } : {}), ...(t.reason ? { reason: t.reason.slice(0, 300) } : {}) })),
+  };
+  const base = `${r.provider}/${r.model}${wf?.employee ? ` via workforce:${wf.employee}` : ""}`;
+  const label = record.usedFallback ? `${base} (FALLBACK${record.selected ? `; first choice was ${record.selected.provider}/${record.selected.model}` : ""}${failed.length ? `; ${failed.length} failed attempt${failed.length === 1 ? "" : "s"}` : ""})` : base;
+  return { label, record };
 }
 
 export class MissionRunner {
@@ -124,8 +144,8 @@ export class MissionRunner {
     }
     if (providerResult) {
       // Model output is a work product, never evidence: it is stored apart and flagged accordingly.
-      const wf = (providerResult as { workforce?: { employee?: string; usedFallback?: boolean } }).workforce;
-      store.missionOutputs.set(taskId, { generatedBy: `${providerResult.provider}/${providerResult.model}${wf?.employee ? ` via workforce:${wf.employee}${wf.usedFallback ? " (fallback)" : ""}` : ""}`, text: providerResult.text, isEvidence: false });
+      const routing = describeRouting(providerResult, result.task.missionType ? MISSION_TASK_TYPE[result.task.missionType] ?? null : null);
+      store.missionOutputs.set(taskId, { generatedBy: routing.label, text: providerResult.text, isEvidence: false, routing: routing.record });
     }
     const transactions = ledger.list().filter((t) => t.evidenceRefs.includes(`lineage:${result.lineageId}`));
     const day = (this.options.now?.() ?? new Date()).toISOString().slice(0, 10);

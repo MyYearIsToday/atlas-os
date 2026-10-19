@@ -1,9 +1,9 @@
 import type { AIProvider } from "../../src/workforce/provider-interface";
 import type { AIJobRequest, AIProviderFailure, AIProviderResult, AIProviderSuccess, ProviderHealth } from "../../src/workforce/provider-types";
 import type { WorkerRole } from "../../src/orchestrator/orchestration-types";
-import { EMPLOYEES, WorkforceRegistry, type EmployeeId, type ProviderId } from "./registry";
+import { EMPLOYEES, OPENROUTER_FREE_ROUTER, WorkforceRegistry, type EmployeeId, type ProviderId } from "./registry";
 import { detectMedia, routeTask, type ChatMessage } from "./router";
-import { ProviderError, WorkforceError, WorkforceExecutor, classify, type AttemptTrace, type CallModel } from "./executor";
+import { ProviderError, WorkforceError, WorkforceExecutor, classify, summarizeAttempts, type AttemptTrace, type CallModel } from "./executor";
 
 /**
  * Sprint 5F integration. Registered on the proxy as providerId "workforce" — the existing
@@ -34,10 +34,29 @@ export function withWorkforceRouting<C extends { workerProviderMap: Record<strin
   return { ...config, workerProviderMap: map };
 }
 
+/**
+ * Free-only exclusive routing. Root cause of the Royal Kamak dossier running every stage on Llama 3.1 8B: the Workforce was first,
+ * but any Workforce failure (a timeout, a rate limit) was read by ai-job as "low confidence", retried, then ESCALATED to the plain
+ * "openrouter" tier whose default model is meta-llama/llama-3.1-8b-instruct (not a zero-priced model), with no record of why.
+ * Here the Workforce is the ONLY tier for non-finance roles (its chains already end in openrouter/free and NVIDIA Ultra), and the
+ * remaining OpenRouter default is the zero-cost router, so no path can reach a paid or unrecorded model. Pure.
+ */
+export function withFreeWorkforceRouting<C extends { workerProviderMap: Record<string, string[]>; modelDefaults: Record<string, string> }>(config: C, workforceAvailable: boolean): C {
+  const free = { ...config, modelDefaults: { ...config.modelDefaults, openrouter: OPENROUTER_FREE_ROUTER } };
+  if (!workforceAvailable) return free;
+  const map: Record<string, string[]> = {};
+  for (const [role, order] of Object.entries(free.workerProviderMap)) map[role] = role === "finance" ? order : ["workforce"];
+  return { ...free, workerProviderMap: map };
+}
+
 export interface WorkforceMeta {
   employee: string;
   routedBy: string;
   usedFallback: boolean;
+  /** The task type that was requested (null when routing used only the worker role). */
+  taskType: string | null;
+  /** First choice of the router. The success result's provider/model are what actually answered; they are never relabeled. */
+  selected: { providerId: string; model: string } | null;
   attempts: AttemptTrace[];
 }
 export type WorkforceSuccess = AIProviderSuccess & { workforce: WorkforceMeta };
@@ -83,6 +102,8 @@ export function providerCallModel(providers: Record<string, AIProvider>): CallMo
 
 export class WorkforceProvider implements AIProvider {
   readonly id = "workforce" as const;
+  /** The executor already retried and walked its whole free-model chain; a failure here must not be retried or silently re-routed. */
+  readonly retriesInternally = true;
 
   constructor(
     public readonly registry: WorkforceRegistry,
@@ -144,14 +165,14 @@ export class WorkforceProvider implements AIProvider {
       const out: WorkforceSuccess = {
         ...inner,
         provider: r.providerId as ProviderId,
-        workforce: { employee: r.employee, routedBy: target.routedBy, usedFallback: r.usedFallback, attempts: r.attempts },
+        workforce: { employee: r.employee, routedBy: target.routedBy, usedFallback: r.usedFallback, taskType: request.taskType ?? null, selected: r.selected, attempts: r.attempts },
       };
       return out;
     } catch (e) {
       if (e instanceof WorkforceError) {
-        const meta = { employee: target.employee, routedBy: target.routedBy, attempts: e.attempts };
+        const meta = { employee: target.employee, routedBy: target.routedBy, taskType: request.taskType ?? null, attempts: e.attempts };
         if (e.code === "ALL_MODELS_UNAVAILABLE") return FAIL("PROVIDER_UNAVAILABLE", e.message, meta);
-        return FAIL("INVALID_RESPONSE", `${e.code}: ${e.message}`, meta);
+        return FAIL("INVALID_RESPONSE", `${e.code}: ${e.message}${e.attempts.length ? ` (${summarizeAttempts(e.attempts)})` : ""}`, meta);
       }
       return FAIL("PROVIDER_UNAVAILABLE", "Internal workforce error");
     }

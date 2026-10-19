@@ -5,7 +5,7 @@ import type { AIProvider } from "../src/workforce/provider-interface";
 import type { AIJobRequest, ProviderId } from "../src/workforce/provider-types";
 import { defaultWorkforceConfig } from "../src/workforce/workforce-config";
 import { safeFetch } from "./atlas/source-tools";
-import { WorkforceProvider, withWorkforceRouting } from "./workforce/workforce-provider";
+import { WorkforceProvider, withFreeWorkforceRouting } from "./workforce/workforce-provider";
 import { AtlasOrchestrator } from "../src/orchestrator/orchestrator";
 import { InMemoryBusinessRepository } from "../src/services/scout/business-repository";
 import { createScoutDiscoveryProvider } from "../src/services/scout/discovery-provider-factory";
@@ -606,7 +606,7 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       if (multimodalEnabled && providers?.workforce) {
         pipelineDeps.multimodalIntelligence = new MultimodalIntelligenceService(providers.workforce);
       }
-      const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: withWorkforceRouting(defaultWorkforceConfig, Boolean(providers?.workforce) && executionEnabled), ledger, orchestrator,
+      const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: withFreeWorkforceRouting(defaultWorkforceConfig, Boolean(providers?.workforce) && executionEnabled), ledger, orchestrator,
         // Approved non-stage missions get the business record, approved-source evidence and prior dossier outputs, not just a title.
         contextProvider: (task) => { if (!task.clientId || String(task.missionType ?? "").startsWith("dossier_") && task.missionType !== "dossier_followup") return undefined; const b = pipelineDeps!.store.businesses.get(task.clientId); return b ? missionContext(b, pipelineDeps!.store.dossiers.get(task.clientId), pipelineDeps!.store) : undefined; } });
       const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled,

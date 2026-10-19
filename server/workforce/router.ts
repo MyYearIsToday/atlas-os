@@ -29,6 +29,13 @@ export function detectMedia(messages: ChatMessage[]): Modality[] {
 
 const TASK_MAP: Record<string, EmployeeId> = {
   research: "scout",
+  deep_research: "scout",
+  competitor_analysis: "business_analyst",
+  market_analysis: "business_analyst",
+  strategy: "ceo_master_planner",
+  reasoning: "ceo_master_planner",
+  vision: "vision_employee",
+  image_generation: "image_designer",
   opportunity_analysis: "business_analyst",
   business_analysis: "business_analyst",
   long_reasoning: "ceo_master_planner",

@@ -30,7 +30,7 @@ export interface ApprovalRecord {
 export interface MissionRunResultLike { executed: boolean; outcome: string; reason?: string; costUsd?: number; completedEventDispatched?: boolean }
 export interface ApprovalDeps {
   lifecycle: LifecycleStore; prospects: ProspectService; delivery: DeliveryService; revenue: RevenueService; missionQueue: MissionQueueRepository;
-  missionOutputs: Map<string, { generatedBy: string; text: string; isEvidence: false }>;
+  missionOutputs: Map<string, { generatedBy: string; text: string; isEvidence: false; routing?: unknown }>;
   runMission?: (taskId: string, approval: { approvedByHuman: boolean }) => Promise<MissionRunResultLike>;
   sender?: OutreachSender; now?: () => string;
 }

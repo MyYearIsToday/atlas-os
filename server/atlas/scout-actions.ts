@@ -213,7 +213,7 @@ export function readMissionResult(deps: PipelineDeps, taskId: string) {
     taskId, title: t.title, businessId: t.clientId ?? null, missionType: t.missionType ?? null, status: t.status, approvalRequired: t.approvalRequired,
     completedAt: t.completedAt ?? null, attempts: t.executionHistory.length, lastFailureReason: t.lastFailureReason ?? null, outcome,
     scope: String(t.description ?? "").replace(/\s+/g, " ").slice(0, 400),
-    output: out && text ? { text: out.text.slice(0, 40_000), generatedBy: out.generatedBy, isEvidence: false as const, note: "AI work product for the operator. It is not verified evidence." } : null,
+    output: out && text ? { text: out.text.slice(0, 40_000), generatedBy: out.generatedBy, routing: (out as { routing?: unknown }).routing ?? null, isEvidence: false as const, note: "AI work product for the operator. It is not verified evidence." } : null,
     stage: stage ? { id: stage.id, title: stage.title, status: dossier!.stages[stage.id].status, parsed: dossier!.stages[stage.id].output ?? null } : null,
     history: t.executionHistory.slice(-5).map((h) => ({ attempt: h.attempt, outcome: h.outcome, at: h.completedAt, reason: h.reason ?? null })),
   };

@@ -9,6 +9,9 @@ import type { AIJobRequest, AIProviderResult, ProviderHealth, ProviderId } from 
 export interface AIProvider {
   readonly id: ProviderId;
 
+  /** True when execute() already retries and falls back internally (the Workforce): ai-job then never retries the same tier. */
+  readonly retriesInternally?: boolean;
+
   execute(request: AIJobRequest): Promise<AIProviderResult>;
 
   /** Structural request validation only — does not call the network. */

@@ -98,7 +98,7 @@ test("Sprint 5F integration over real loopback HTTP", async () => {
   assert.equal((await post({ providerId: "workforce", request: req() }, false)).status, 401);
   assert.equal((await get("/api/ai/workforce", false)).status, 401);
   const reg = await get("/api/ai/workforce");
-  assert.equal(reg.status, 200); assert.equal(reg.body.employees.length, 10);
+  assert.equal(reg.status, 200); assert.equal(reg.body.employees.length, 11);
   assert.ok(!JSON.stringify([reg.body, r.body]).includes("SENTINEL"));
 
   // client wiring: opt-in config keeps defaults untouched, finance excluded

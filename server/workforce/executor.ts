@@ -76,8 +76,15 @@ export interface ExecuteResult {
   providerId: ProviderId;
   model: string;
   usedFallback: boolean;
+  /** What routing chose first (before any failure). `providerId`/`model` above are what actually answered. */
+  selected: { providerId: ProviderId; model: string };
   attempts: AttemptTrace[];
   data: unknown;
+}
+
+/** One-line, secret-free account of every attempt, e.g. "nvidia/x: timeout; openrouter/y: ok". */
+export function summarizeAttempts(attempts: AttemptTrace[]): string {
+  return attempts.map((a) => `${a.providerId}/${a.model}: ${a.outcome}${a.status ? ` ${a.status}` : ""}`).join("; ");
 }
 
 export interface RegistryLike {
@@ -108,8 +115,8 @@ export class WorkforceExecutor {
       sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
       now: deps.now ?? Date.now,
       random: deps.random ?? Math.random,
-      requestTimeoutMs: deps.requestTimeoutMs ?? 30000,
-      totalBudgetMs: deps.totalBudgetMs ?? 60000,
+      requestTimeoutMs: deps.requestTimeoutMs ?? 90000,
+      totalBudgetMs: deps.totalBudgetMs ?? 240000,
       maxRateLimitWaitMs: deps.maxRateLimitWaitMs ?? 8000,
     };
   }
@@ -177,7 +184,7 @@ export class WorkforceExecutor {
           this.record(c, ms);
           this.cooldown.delete(this.key(c));
           attempts.push({ providerId: c.providerId, model: c.model, outcome: "ok", ms });
-          return { ok: true, employee: input.employee, providerId: c.providerId, model: c.model, usedFallback: c !== capable[0], attempts, data };
+          return { ok: true, employee: input.employee, providerId: c.providerId, model: c.model, usedFallback: c !== capable[0], selected: { providerId: capable[0]!.providerId, model: capable[0]!.model }, attempts, data };
         } catch (err) {
           const e = err instanceof ProviderError ? err : new ProviderError("network", null, "unclassified provider failure");
           const ms = this.d.now() - t0;
@@ -220,7 +227,7 @@ export class WorkforceExecutor {
         }
       }
     }
-    throw new WorkforceError("ALL_MODELS_UNAVAILABLE", 503, `All models for "${input.employee}" are unavailable or rate limited`, attempts);
+    throw new WorkforceError("ALL_MODELS_UNAVAILABLE", 503, `All models for "${input.employee}" failed (${summarizeAttempts(attempts)})`, attempts);
   }
 }
 

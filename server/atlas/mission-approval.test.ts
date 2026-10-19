@@ -49,3 +49,23 @@ test("a mission with an incomplete prerequisite does not execute", async () => {
   const r = await c.runner.run(c.task.taskId, { approvedByHuman: true });
   assert.equal(r.outcome, "BLOCKED"); assert.equal(c.calls(), 0); assert.notEqual(status(c), "Completed");
 });
+
+test("the saved result records requested task, employee, first choice, the model that actually answered, and failed attempts", async () => {
+  const deps = createPipelineDeps({});
+  const task = await deps.missionQueue.create({ title: "Competitor scan", description: "d", assignedAI: "scout", clientId: "b1", priority: "Medium", approvalRequired: "Approval Required", missionType: "dossier_competitors", dueDate: "2026-10-18", estimatedCost: 0, estimatedTime: "u" } as never);
+  const workforce = { async executeMission(taskId: string) {
+    const t = await deps.missionQueue.update(taskId, { status: "Completed", completedAt: new Date().toISOString() });
+    return { outcome: "COMPLETED" as const, task: t, attempts: 1, lineageId: "l1", result: { failed: false, provider: "openrouter", model: "vendor/fallback-70b:free", text: "A long enough competitor analysis output.", usage: { promptTokens: 1, completionTokens: 1 }, estimatedCostUsd: 0,
+      workforce: { employee: "business_analyst", routedBy: "task_type", usedFallback: true, taskType: "competitor_analysis", selected: { providerId: "openrouter", model: "vendor/first-choice-235b:free" },
+        attempts: [{ providerId: "openrouter", model: "vendor/first-choice-235b:free", outcome: "rate_limit", status: 429, ms: 5 }, { providerId: "openrouter", model: "vendor/fallback-70b:free", outcome: "ok", ms: 900 }] },
+      routing: { trail: [{ tier: 0, providerId: "workforce", ok: true, model: "vendor/fallback-70b:free" }] } } as never };
+  } };
+  const runner = new MissionRunner({ workforce: workforce as never, missionQueue: deps.missionQueue, ledger: { list: () => [] } as never, dispatcher: { dispatch: async () => undefined } as never, store: deps.store, executionEnabled: true });
+  assert.equal((await runner.run(task.taskId, { approvedByHuman: true })).outcome, "COMPLETED");
+  const out = deps.store.missionOutputs.get(task.taskId)!;
+  assert.match(out.generatedBy, /^openrouter\/vendor\/fallback-70b:free via workforce:business_analyst \(FALLBACK; first choice was openrouter\/vendor\/first-choice-235b:free; 1 failed attempt\)$/);
+  const r = out.routing!;
+  assert.equal(r.taskType, "competitor_analysis"); assert.equal(r.employee, "business_analyst");
+  assert.equal(r.selected!.model, "vendor/first-choice-235b:free"); assert.equal(r.actual.model, "vendor/fallback-70b:free");
+  assert.equal(r.usedFallback, true); assert.deepEqual(r.attempts.map((a) => a.outcome), ["rate_limit", "ok"]);
+});

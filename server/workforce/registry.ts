@@ -30,6 +30,7 @@ export const EMPLOYEES = [
   "writer",
   "vision_employee",
   "document_analyst",
+  "image_designer",
   "future_falconfx_worker",
 ] as const;
 export type EmployeeId = (typeof EMPLOYEES)[number];
@@ -56,6 +57,8 @@ export interface Candidate {
   codingHint: boolean;
   fastHint: boolean;
   paramsB: number | null;
+  /** Total (not active) parameter count in billions when the id states it. */
+  totalB: number | null;
 }
 
 export interface ChainItem {
@@ -117,14 +120,50 @@ export function toCandidate(m: CatalogModel): Candidate | null {
     codingHint: CODING.test(`${label} ${m.description ?? ""}`),
     fastHint: FAST.test(label),
     paramsB: paramsB(m.id),
+    totalB: totalParamsB(m.id),
   };
 }
 
+function totalParamsB(id: string): number | null {
+  const all = [...id.matchAll(/(?:^|[^a-z0-9.])(\d+(?:\.\d+)?)b(?![a-z])/gi)].map((x) => Number(x[1]));
+  return all.length ? Math.max(...all) : null;
+}
+
+/** Zero-priced models that can OUTPUT images (image generation). Text-only models never qualify. */
+export function toImageCandidate(m: CatalogModel): ChainItem | null {
+  if (!m?.id || !isZeroPriced(m) || m.id.startsWith("openrouter/")) return null;
+  if (!(m.architecture?.output_modalities ?? []).includes("image")) return null;
+  return { providerId: "openrouter", model: m.id, inputModalities: ["text"] };
+}
+
+/**
+ * Quality ranking. The OpenRouter catalog carries NO quality benchmark, so this is a documented HEURISTIC over what the catalog
+ * does state (parameter count in the id, reasoning/tool support, context) plus family hints for model families known to be
+ * strong general reasoners. Family hints only ever apply to models that are present AND zero-priced in the live catalog; a model
+ * that does not appear there is never selected. Whether a ranked model is actually USABLE is decided at call time (executor
+ * health, rate limits and cooldowns) and every attempt is recorded.
+ */
+const FAMILY_TIERS: Array<[RegExp, number]> = [
+  [/nemotron[^/]*(ultra|super)|deepseek[^/]*(r1|v3|v4)|qwen3[^/]*(235b|480b|max)|gpt-oss-120b|kimi[^/]*k2|glm-?4\.[5-9]|glm-?[5-9]|llama-3\.1-405b|hermes-[34][^/]*405b|minimax-m|mimo|longcat/i, 5],
+  [/llama-3\.3-70b|llama-4|qwen3?[^/]*(72b|32b|30b|next)|gpt-oss-20b|mistral-(large|medium)|gemma-?[34][^/]*27b|nemotron/i, 4],
+  [/mistral|gemma|phi-4|qwen|llama|glm|hermes|dolphin/i, 2],
+];
+export type TaskProfile = "deep" | "writing";
+
+export function qualityScore(c: Candidate, profile: TaskProfile = "deep"): number {
+  const tier = FAMILY_TIERS.find(([re]) => re.test(c.id))?.[1] ?? 1;
+  const size = c.totalB ?? c.paramsB;
+  const sizeScore = size ? Math.log2(Math.max(size, 1)) * 3 : 4; // unknown size: neutral-low, never a bonus
+  const ctx = Math.min(c.contextLength, 262144) / 65536; // 0..4
+  let score = tier * 10 + sizeScore + b2n(c.reasoning) * (profile === "deep" ? 8 : 3) + b2n(c.tools) * 2 + ctx * (profile === "writing" ? 3 : 1.5);
+  if (size !== null && size < 20) score -= 30; // small models are not eligible to lead deep research, analysis or strategy
+  if (c.contextLength < 32000) score -= 20; // the dossier prompts carry fetched pages
+  return score;
+}
+
 const b2n = (x: boolean) => Number(x);
-const strongest = (a: Candidate, b: Candidate) =>
-  b2n(b.reasoning) - b2n(a.reasoning) || b2n(b.tools) - b2n(a.tools) || b.contextLength - a.contextLength || a.id.localeCompare(b.id);
-const longest = (a: Candidate, b: Candidate) =>
-  b.contextLength - a.contextLength || b2n(b.reasoning) - b2n(a.reasoning) || a.id.localeCompare(b.id);
+const strongest = (a: Candidate, b: Candidate) => qualityScore(b, "deep") - qualityScore(a, "deep") || a.id.localeCompare(b.id);
+const longest = (a: Candidate, b: Candidate) => qualityScore(b, "writing") - qualityScore(a, "writing") || a.id.localeCompare(b.id);
 const fastest = (a: Candidate, b: Candidate) => {
   const pa = a.paramsB ?? Number.POSITIVE_INFINITY;
   const pb = b.paramsB ?? Number.POSITIVE_INFINITY;
@@ -233,6 +272,15 @@ export function buildWorkforce(catalog: CatalogModel[] | null): WorkerEntry[] {
   );
   // contextLength 1,000,000 = OpenRouter listing of the free Ultra variant.
 
+  const imageItems = (catalog ?? []).map(toImageCandidate).filter((c): c is ChainItem => c !== null).slice(0, 3);
+  const imageDesigner: WorkerEntry = imageItems.length
+    ? entry("image_designer", imageItems, "dynamic", { capabilities: { inputModalities: ["text"], contextLength: null, tools: false, reasoning: false }, note: "Image OUTPUT models only (zero-priced, from the live catalog)." })
+    : {
+        employee: "image_designer", providerId: "openrouter", model: null, source: "disabled", fallback: null, chain: [],
+        capabilities: { inputModalities: ["text"], contextLength: null, tools: false, reasoning: false }, enabled: false, speedSensitive: false,
+        note: "No zero-priced image-generation model is listed in the OpenRouter catalog right now. Image generation stays unavailable until a free one appears or you approve a paid model.",
+      };
+
   const falcon: WorkerEntry = {
     employee: "future_falconfx_worker",
     providerId: "openrouter",
@@ -246,7 +294,7 @@ export function buildWorkforce(catalog: CatalogModel[] | null): WorkerEntry[] {
     note: "Placeholder. No spec provided; not routable until configured.",
   };
 
-  return [ceo, scout, analyst, router, fast, coder, writer, vision, docs, falcon];
+  return [ceo, scout, analyst, router, fast, coder, writer, vision, docs, imageDesigner, falcon];
 }
 
 // ---------- runtime registry ----------
@@ -330,7 +378,7 @@ export function verifyRegistry(reg: WorkforceRegistry): Check[] {
   checks.push({ name: "CEO model is exact verified NVIDIA Ultra ID", pass: fixed("ceo_master_planner")?.model === "nvidia/nemotron-3-ultra-550b-a55b" });
   checks.push({ name: "Vision model is exact verified NVIDIA Omni ID", pass: fixed("vision_employee")?.model === "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" });
   checks.push({ name: "Document analyst uses NVIDIA Omni", pass: fixed("document_analyst")?.model === NVIDIA_OMNI });
-  checks.push({ name: "All 10 employees present", pass: list.length === EMPLOYEES.length });
+  checks.push({ name: "All employees present", pass: list.length === EMPLOYEES.length });
   checks.push({ name: "All providerIds valid", pass: list.every((e) => (PROVIDER_IDS as readonly string[]).includes(e.providerId) && e.chain.every((c) => (PROVIDER_IDS as readonly string[]).includes(c.providerId))) });
 
   const dyn = list.flatMap((e) => e.chain.filter((c) => c.providerId === "openrouter" && c.model !== OPENROUTER_FREE_ROUTER).map((c) => ({ e: e.employee, c })));
