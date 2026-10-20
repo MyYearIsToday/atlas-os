@@ -8,7 +8,7 @@ import type { BusinessRepository } from "../../src/services/scout/business-repos
 import type { AutonomyRuntime } from "../../src/services/autonomy/observability";
 import type { AutonomyCycle } from "../../src/services/autonomy/loop";
 import type { Dossier } from "../../src/orchestrator/dossier-types";
-import { STAGES, imageSummary, type DossierEngine } from "./dossier";
+import { STAGES, emptyStage, imageSummary, upgradeDossier, type DossierEngine } from "./dossier";
 
 /**
  * Scout visibility + operator authorisation ("Start working") + bounded "process now".
@@ -45,6 +45,7 @@ export function deriveStates(row: ViewRow, ctx: { inPipeline: boolean; observati
   if (!ctx.inPipeline) return ["awaiting_authorization"];
   const found = new Set<CandidateState>();
   const d = ctx.dossier;
+  if (d) upgradeDossier(d);
   const stageStatuses = d ? STAGES.map((s) => d.stages[s.id].status) : [];
   if (d?.status === "blocked" || stageStatuses.includes("blocked")) found.add("blocked");
   if (stageStatuses.includes("failed") || row.missions.some((m) => m.status === "Failed" && !DOSSIER_TYPES.has(String(m.missionType)))) found.add("failed");
@@ -60,6 +61,7 @@ export function deriveStates(row: ViewRow, ctx: { inPipeline: boolean; observati
 
 export function summarizeDossier(d: Dossier | undefined, missions: Array<{ taskId: string; status: string }> = []) {
   if (!d) return null;
+  upgradeDossier(d); // a dossier persisted by older code may lack newer stage records; reading must never throw
   return {
     status: d.status, updatedAt: d.updatedAt, manualRetries: d.manualRetries, sources: d.sources.length, sourceApproval: d.sourceApproval ?? null, sourcesApproved: d.sources.filter((s) => s.decision === "approved").length, sourcesPending: d.sources.filter((s) => (s.decision ?? "pending") === "pending").length, limitations: d.limitations,
     images: imageSummary(d),
@@ -158,7 +160,7 @@ export interface ProcessSummary {
   pending: { awaitingAuthorization: number; awaitingApproval: number; activeDossiers: number };
 }
 
-const countStages = (ctx: ActionContext, status: string) => [...ctx.pipeline.deps.store.dossiers.values()].reduce((n, d) => n + STAGES.filter((s) => d.stages[s.id].status === status).length, 0);
+const countStages = (ctx: ActionContext, status: string) => [...ctx.pipeline.deps.store.dossiers.values()].reduce((n, d) => n + STAGES.filter((s) => d.stages[s.id]?.status === status).length, 0);
 
 export class ProcessController {
   private current: Promise<void> | null = null;
@@ -184,7 +186,7 @@ export class ProcessController {
     summary.dossiers.stagesCompleted = countStages(ctx, "completed") - before;
     summary.dossiers.stagesFailed = Math.max(0, countStages(ctx, "failed") - failedBefore);
     for (const d of deps.store.dossiers.values()) {
-      for (const s of STAGES) { const st = d.stages[s.id]; if (st.status === "blocked" || st.status === "failed") summary.failed.push(`${d.businessId}/${s.id}: ${st.status}${st.error ? ` (${st.error})` : ""}`); if (st.status === "blocked") summary.dossiers.blocked.push(`${d.businessId}/${s.id}`); }
+      for (const s of STAGES) { const st = d.stages[s.id]; if (!st) continue; if (st.status === "blocked" || st.status === "failed") summary.failed.push(`${d.businessId}/${s.id}: ${st.status}${st.error ? ` (${st.error})` : ""}`); if (st.status === "blocked") summary.dossiers.blocked.push(`${d.businessId}/${s.id}`); }
     }
     // 2) One existing autonomy cycle (internal decisions only, its own limits/breaker, never overlaps the scheduled one).
     const woke = await autonomy.scheduler.wake("manual");

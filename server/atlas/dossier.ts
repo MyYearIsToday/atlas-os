@@ -69,7 +69,7 @@ export const STAGES: StageDef[] = [
 ];
 const stageDef = (id: StageId) => STAGES.find((s) => s.id === id)!;
 
-const emptyStage = (): StageRecord => ({ status: "pending", taskId: null, attempts: 0, startedAt: null, completedAt: null, lastAttemptAt: null, error: null, generatedBy: null, output: null });
+export const emptyStage = (): StageRecord => ({ status: "pending", taskId: null, attempts: 0, startedAt: null, completedAt: null, lastAttemptAt: null, error: null, generatedBy: null, output: null });
 const clip = (v: unknown, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 
 // ------------------------------------------------------------------ parsing / validation
@@ -239,14 +239,16 @@ export function missionContext(b: BusinessIntelligence, d: Dossier | undefined, 
 export class DossierEngine {
   private active = new Set<string>();
   private drives = new Map<string, Promise<void>>();
-  constructor(private d: DossierDeps) {}
+  constructor(private d: DossierDeps) {
+    // Dossiers hydrated from PostgreSQL were written by older code. Bring them to the current shape in memory (additive only; written back on the next normal save).
+    for (const x of this.d.store.dossiers.values()) upgradeDossier(x);
+  }
   private now() { return (this.d.now ?? (() => new Date().toISOString()))(); }
   private save(x: Dossier) { x.updatedAt = this.now(); this.d.store.dossiers.set(x.businessId, x); }
 
   get(businessId: string): Dossier | undefined {
     const x = this.d.store.dossiers.get(businessId);
-    // Dossiers saved before newer stages existed gain the new (pending) stages; nothing already produced is touched.
-    if (x) for (const s of STAGES) if (!x.stages[s.id]) x.stages[s.id] = emptyStage();
+    if (x) upgradeDossier(x);
     return x;
   }
 
@@ -801,4 +803,18 @@ export class DossierEngine {
 export function imageSummary(x: Dossier) {
   const imgs = x.images ?? []; const n = (d: string) => imgs.filter((i) => i.decision === d).length;
   return { total: imgs.length, confirmed: n("confirmed"), rejected: n("rejected"), needsConfirmation: n("needs_user_confirmation"), skipped: n("skipped"), unassessed: n("pending"), retrievalFailed: imgs.filter((i) => i.retrieval?.status === "failed").length };
+}
+
+/**
+ * Bring a dossier persisted by older code up to the current shape, in place. Additive only: missing stage records become pending,
+ * missing arrays become empty, images gain the default (unknown) reuse-rights record. Nothing already produced or decided is changed.
+ * Returns true if anything was added.
+ */
+export function upgradeDossier(x: Dossier): boolean {
+  let changed = false;
+  if (!x.stages) { x.stages = {} as Dossier["stages"]; changed = true; }
+  for (const s of STAGES) if (!x.stages[s.id]) { x.stages[s.id] = emptyStage(); changed = true; }
+  for (const k of ["sources", "limitations", "followUps"] as const) if (!Array.isArray(x[k])) { (x as unknown as Record<string, unknown>)[k] = []; changed = true; }
+  for (const i of x.images ?? []) if (!i.rights) { i.rights = { ...DEFAULT_IMAGE_RIGHTS }; changed = true; }
+  return changed;
 }

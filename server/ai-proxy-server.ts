@@ -513,6 +513,8 @@ export function createAiProxyServer(
       logRequest(method, url, 404, Date.now() - started);
     } catch (error) {
       const isBodyTooLarge = error instanceof Error && (error as any).code === "BODY_TOO_LARGE";
+      // The client only ever sees "Internal error"; record the cause server-side (name, message and the throwing frame only; no request data or secrets).
+      if (!isBodyTooLarge) console.error(`[atlas-proxy] unhandled error ${method} ${url}: ${error instanceof Error ? `${error.name}: ${error.message.slice(0, 200)} @ ${(error.stack ?? "").split("\n")[1]?.trim().slice(0, 160) ?? "?"}` : "non-Error thrown"}`);
       sendJson(res, isBodyTooLarge ? 413 : 500, { failed: true, code: isBodyTooLarge ? "INVALID_RESPONSE" : "PROVIDER_UNAVAILABLE", reason: isBodyTooLarge ? "Request body too large" : "Internal error" });
       logRequest(method, url, isBodyTooLarge ? 413 : 500, Date.now() - started);
     }
