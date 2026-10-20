@@ -33,9 +33,20 @@ export type MultimodalAnalysisResult =
   | { status: "ANALYZED"; observations: MultimodalObservation[] }
   | { status: "UNSUPPORTED_MEDIA" | "INVALID_INPUT" | "PROVIDER_UNAVAILABLE" | "MALFORMED_OUTPUT"; observations: [] };
 
+/** Raw vision call with a caller-supplied prompt (used for image-to-business association). The text is returned for the caller to validate. */
+export type InspectResult =
+  | { status: "OK"; text: string; provider: string; model: string }
+  | { status: "UNSUPPORTED_MEDIA" | "INVALID_INPUT" | "PROVIDER_UNAVAILABLE"; reason: string };
+/** Reference images are already-confirmed brand assets shown alongside the candidate for comparison. */
+export interface InspectInput { businessId: string; prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[]; references?: Array<{ id: string; mimeType: string; dataUrl: string }> }
+
 export interface MultimodalIntelligence {
   analyze(input: MultimodalMediaInput): Promise<MultimodalAnalysisResult>;
+  inspect?(input: InspectInput): Promise<InspectResult>;
 }
+const MAX_INSPECT_DATA_URL_CHARS = 1_450_000;
+const MAX_INSPECT_TOTAL_CHARS = 2_000_000;
+const MAX_REFERENCES = 2;
 
 export interface MultimodalIntelligenceOptions {
   now?: () => Date;
@@ -97,6 +108,29 @@ export class MultimodalIntelligenceService implements MultimodalIntelligence {
   constructor(private readonly provider: AIProvider, options: MultimodalIntelligenceOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
+  }
+
+  async inspect(input: InspectInput): Promise<InspectResult> {
+    const mimeType = String(input?.mimeType ?? "").toLowerCase().split(";")[0].trim();
+    const m = /^data:(image\/(?:jpeg|png|webp));base64,([a-z0-9+/]+=*)$/i.exec(String(input?.dataUrl ?? ""));
+    if (!IMAGE_MIME_TYPES.has(mimeType) || !m || m[1].toLowerCase() !== mimeType) return { status: "UNSUPPORTED_MEDIA", reason: "unsupported image format" };
+    if (!input.businessId || !input.prompt || input.dataUrl.length > MAX_INSPECT_DATA_URL_CHARS) return { status: "INVALID_INPUT", reason: "invalid or oversized input" };
+    const refs = input.references ?? [];
+    if (refs.length > MAX_REFERENCES || refs.some((r) => !/^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/]+=*$/i.test(String(r?.dataUrl ?? "")) || !/^[\w-]{1,20}$/.test(String(r?.id ?? ""))) || input.dataUrl.length + refs.reduce((n, r) => n + r.dataUrl.length, 0) > MAX_INSPECT_TOTAL_CHARS) return { status: "INVALID_INPUT", reason: "invalid or oversized reference images" };
+    if (this.provider.id !== "workforce") return { status: "PROVIDER_UNAVAILABLE", reason: "the AI Workforce is not the active provider" };
+    const request: AIJobRequest = {
+      workerRole: "analyst", task: "Inspect the attached image and answer in the JSON format requested.", priority: 2, confidenceTarget: 0.5, budgetLimitUsd: 0.1, maxTokens: 900, temperature: 0.1, timeoutMs: 60_000,
+      lineageId: `atlas-image-association:${input.businessId}`, taskType: "image", ...(input.excludeModels?.length ? { excludeModels: input.excludeModels } : {}),
+      messages: [{ role: "user", content: [
+        { type: "text", text: input.prompt }, { type: "text", text: "CANDIDATE image:" }, { type: "image_url", image_url: { url: input.dataUrl } },
+        ...refs.flatMap((r) => [{ type: "text" as const, text: `REFERENCE image ${r.id} (already confirmed as this business's brand asset):` }, { type: "image_url" as const, image_url: { url: r.dataUrl } }]),
+      ] }],
+    };
+    try {
+      const r = await this.provider.execute(request);
+      if (r.failed) return { status: "PROVIDER_UNAVAILABLE", reason: `${r.code}: ${String(r.reason).slice(0, 120)}` };
+      return { status: "OK", text: r.text, provider: r.provider, model: r.model };
+    } catch { return { status: "PROVIDER_UNAVAILABLE", reason: "provider error" }; }
   }
 
   async analyze(input: MultimodalMediaInput): Promise<MultimodalAnalysisResult> {

@@ -30,6 +30,8 @@ export interface AtlasPersistence {
   loadEvents(): Promise<Array<{ eventId: string; processedAtMs: number }>>;
   flush(): Promise<void>;
   health(): PersistenceHealth;
+  /** Read-only full logical backup (PostgreSQL only). */
+  backup?(): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -95,6 +97,8 @@ export class PostgresAtlasPersistence implements AtlasPersistence {
     }
     return { applied, current: MIGRATIONS[MIGRATIONS.length - 1].version };
   }
+
+  async backup() { await this.flush(); const { exportBackup } = await import("./backup"); return exportBackup(this.db); }
 
   private enqueue(run: () => Promise<unknown>) {
     this.pending++;

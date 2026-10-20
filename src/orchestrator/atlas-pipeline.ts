@@ -49,7 +49,23 @@ export interface PipelineTraceEntry {
   error?: string;
 }
 
-export interface MissionOutput { generatedBy: string; text: string; isEvidence: false }
+/** How one result was produced. Written once at completion; never edited, never relabeled after a fallback. */
+export interface RoutingRecord {
+  taskType: string | null;
+  employee: string | null;
+  routedBy: string | null;
+  /** What routing chose first. */
+  selected: { provider: string; model: string } | null;
+  /** What actually answered. */
+  actual: { provider: string; model: string };
+  usedFallback: boolean;
+  succeeded: true;
+  /** Every model call in order, failures included. */
+  attempts: Array<{ provider: string; model: string; outcome: string; status?: number; ms: number }>;
+  /** Provider tiers tried by the job runner (a failed tier stays visible even when a later one succeeds). */
+  tiers: Array<{ tier: number; provider: string; ok: boolean; model?: string; code?: string; reason?: string }>;
+}
+export interface MissionOutput { generatedBy: string; text: string; isEvidence: false; routing?: RoutingRecord }
 
 /** A Map that reports every mutation so a durable store can mirror it. */
 class ObservedMap<V> extends Map<string, V> {
@@ -307,7 +323,7 @@ export function applyScoringGate(raw: OpportunityScore): ScoringOutcome {
 export const INTERNAL_AUDIT_SUMMARY = "internal_audit_summary";
 
 /** Dossier stage missions (internal AI text work products for one operator-authorised business; never evidence, no external effect). */
-export const DOSSIER_MISSION_TYPES = ["dossier_profile", "dossier_audit", "dossier_swot", "dossier_growth", "dossier_plan"] as const;
+export const DOSSIER_MISSION_TYPES = ["dossier_profile", "dossier_audit", "dossier_competitors", "dossier_market", "dossier_swot", "dossier_growth", "dossier_campaign", "dossier_plan"] as const;
 
 /** Facts handed to the summary mission, built only from Atlas's own stored state. */
 function summaryFacts(business: BusinessIntelligence, outcome: ScoringOutcome, observations: EvidenceRecord[]): string {

@@ -91,7 +91,7 @@ export function readAutonomy(method: string, pathname: string, query: URLSearchP
     const status = query.get("status"), business = query.get("businessId");
     const list = rt.missionQueue.getSnapshot().filter((t) => (!status || t.status === status) && (!business || t.clientId === business));
     const page = paginate(list, (t) => `${t.createdAt}|${t.taskId}`, paging);
-    return { status: 200, body: { items: page.items.map((t) => ({ taskId: t.taskId, title: t.title, businessId: t.clientId, missionType: t.missionType ?? null, status: t.status, approvalRequired: t.approvalRequired, retryCount: t.retryCount, createdAt: t.createdAt, completedAt: t.completedAt, lastFailureReason: t.lastFailureReason, attempts: t.executionHistory.length, hasOutput: rt.pipeline.missionOutputs.has(t.taskId), version: missionVersion(t) })), nextCursor: page.nextCursor } };
+    return { status: 200, body: { items: page.items.map((t) => ({ taskId: t.taskId, title: t.title, businessId: t.clientId, missionType: t.missionType ?? null, status: t.status, approvalRequired: t.approvalRequired, retryCount: t.retryCount, createdAt: t.createdAt, completedAt: t.completedAt, lastFailureReason: t.lastFailureReason, attempts: t.executionHistory.length, hasOutput: rt.pipeline.missionOutputs.has(t.taskId), blockedBy: rt.pipeline.dossiers.get(t.clientId ?? "")?.status === "awaiting_sources" && !String(t.missionType ?? "").startsWith("dossier_") ? "Approve this business's research sources first" : null, version: missionVersion(t) })), nextCursor: page.nextCursor } };
   }
 
   if (route === "/api/atlas/autonomy/finance") {

@@ -115,3 +115,34 @@ test("the existing text-only workforce route still resolves the researcher role 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].model, "openrouter/free");
 });
+
+test("inspect sends the actual image through the Workforce vision route with the caller's prompt and reports the real provider/model; bad inputs and provider errors are fixed codes", async () => {
+  const { provider, calls } = mockedWorkforce('{"association":"uncertain"}');
+  const svc = new MultimodalIntelligenceService(provider);
+  const r = await svc.inspect!({ businessId: "b1", prompt: "Is this theirs?", mimeType: "image/png", dataUrl: DATA_URL });
+  assert.equal(r.status, "OK");
+  if (r.status === "OK") { assert.equal(r.model, NVIDIA_OMNI); assert.equal(r.text, '{"association":"uncertain"}'); }
+  const body = JSON.stringify(calls[0].body);
+  assert.match(body, /Is this theirs\?/); assert.match(body, /image_url/); assert.match(body, new RegExp(DATA_URL.slice(0, 40)));
+  assert.equal((await svc.inspect!({ businessId: "b1", prompt: "p", mimeType: "image/gif", dataUrl: "data:image/gif;base64,AAAA" })).status, "UNSUPPORTED_MEDIA");
+  assert.equal((await svc.inspect!({ businessId: "b1", prompt: "p", mimeType: "image/png", dataUrl: `data:image/png;base64,${"A".repeat(1_500_000)}` })).status, "INVALID_INPUT");
+  const failing = new MultimodalIntelligenceService(mockedWorkforce(new Error("secret internal detail")).provider);
+  const f = await failing.inspect!({ businessId: "b1", prompt: "p", mimeType: "image/png", dataUrl: DATA_URL });
+  assert.equal(f.status, "PROVIDER_UNAVAILABLE"); assert.doesNotMatch(JSON.stringify(f), /secret internal detail/);
+});
+
+test("inspect sends reference images after the candidate, labelled, and rejects invalid or oversized references", async () => {
+  const { provider, calls } = mockedWorkforce('{"association":"uncertain"}');
+  const svc = new MultimodalIntelligenceService(provider);
+  const REF_URL = `data:image/png;base64,${Buffer.from("reference-bytes").toString("base64")}`;
+  const r = await svc.inspect!({ businessId: "b1", prompt: "compare", mimeType: "image/png", dataUrl: DATA_URL, references: [{ id: "I1", mimeType: "image/png", dataUrl: REF_URL }] });
+  assert.equal(r.status, "OK");
+  const body = JSON.stringify(calls[0].body);
+  assert.match(body, /CANDIDATE image:/); assert.match(body, /REFERENCE image I1/); assert.ok(body.indexOf("CANDIDATE") < body.indexOf("REFERENCE image I1"));
+  assert.ok(body.includes(REF_URL.slice(0, 50)));
+  const bad = (references: Array<{ id: string; mimeType: string; dataUrl: string }>) => svc.inspect!({ businessId: "b1", prompt: "p", mimeType: "image/png", dataUrl: DATA_URL, references });
+  assert.equal((await bad([{ id: "I1", mimeType: "image/png", dataUrl: "data:text/html;base64,AAAA" }])).status, "INVALID_INPUT");
+  assert.equal((await bad([{ id: "bad id!", mimeType: "image/png", dataUrl: REF_URL }])).status, "INVALID_INPUT");
+  assert.equal((await bad([1, 2, 3].map((n) => ({ id: `I${n}`, mimeType: "image/png", dataUrl: REF_URL })))).status, "INVALID_INPUT");
+  assert.equal((await bad([{ id: "I1", mimeType: "image/png", dataUrl: `data:image/png;base64,${"A".repeat(2_100_000)}` }])).status, "INVALID_INPUT");
+});

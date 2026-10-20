@@ -55,8 +55,11 @@ test("dynamic registry: assignments, fixed NVIDIA IDs, zero pricing, disabled pl
   assert.equal(get("ceo_master_planner").source, "fixed");
   assert.equal(get("vision_employee").model, NVIDIA_OMNI);
   assert.equal(get("document_analyst").model, NVIDIA_OMNI);
-  assert.equal(get("scout").model, "test/alpha-reasoner");
-  assert.equal(get("writer").model, "test/beta-longctx");
+  // Quality-first: a larger reasoning model leads deep research; tiny models never lead deep roles.
+  assert.equal(get("scout").model, "test/eps-vision-27b");
+  assert.notEqual(get("business_analyst").model, get("scout").model); // heads are spread across employees
+  for (const e of ["scout", "business_analyst", "writer"]) assert.ok(!/1b|4b/.test(get(e).model!), `${e} must not be led by a tiny model`);
+  assert.ok(get("writer").enabled && get("writer").source === "dynamic");
   assert.equal(get("fast_worker").model, "test/zeta-nano-1b");
   assert.notEqual(get("mission_router").model, get("fast_worker").model); // rate-limit spreading
   assert.equal(get("coding_engineer").model, "test/delta-coder-32b");

@@ -24,6 +24,8 @@ export interface AIJobRequest {
   employee?: string;
   taskType?: string;
   messages?: unknown[];
+  /** Routing hint: models that already answered unusably for this work. The Workforce skips them (free-only chains; never adds a paid model). */
+  excludeModels?: string[];
 }
 
 export interface TokenUsage {

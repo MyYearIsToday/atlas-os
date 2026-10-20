@@ -20,7 +20,20 @@ import type { OperationalLedger } from "../services/finance/ledger";
  * this only owns "which real provider call happens for an AI worker step."
  */
 
+/** One provider call made for a job, in order. Failed calls are kept: a later success never hides them. */
+export interface RouteAttempt {
+  tier: number;
+  providerId: string;
+  ok: boolean;
+  /** Model that actually answered (success only). */
+  model?: string;
+  code?: string;
+  reason?: string;
+}
+
 export interface AiJobOutcome {
+  /** The result also carries `routing: { trail }` so downstream code can persist how it was produced. */
+  trail: RouteAttempt[];
   result: AIProviderResult;
   costRecord: CostRecord;
   escalations: number;
@@ -37,23 +50,46 @@ export async function runAiJob(
     const budget = checkDailyBudget(ledger, config);
     if (!budget.allowed) {
       const result: AIProviderResult = { failed: true, provider: config.defaultProvider, code: "BUDGET_EXCEEDED", reason: budget.reason! };
-      return { result, costRecord: buildCostRecord(result, "none", null, null, request.workerRole, request.lineageId), escalations: 0, finalTierIndex: null };
+      return { trail: [], result, costRecord: buildCostRecord(result, "none", null, null, request.workerRole, request.lineageId), escalations: 0, finalTierIndex: null };
     }
   }
 
   const state: EscalationState = { tierIndex: 0, attemptsOnTier: 0, totalEscalations: 0 };
   let lastResult: AIProviderResult | null = null;
+  const trail: RouteAttempt[] = [];
+  const withTrail = (r: AIProviderResult): AIProviderResult => ({ ...r, routing: { trail: [...trail] } }) as unknown as AIProviderResult;
 
   while (true) {
     const decision = selectProvider(request, registry, config, state.tierIndex);
+    if (!decision && lastResult?.failed) {
+      // Out of tiers after a real failure: report THAT failure (with every attempt), not a generic "no provider".
+      const result = withTrail(lastResult);
+      return { trail, result, costRecord: buildCostRecord(result, "none", null, null, request.workerRole, request.lineageId), escalations: state.totalEscalations, finalTierIndex: null };
+    }
     if (!decision) {
       const result: AIProviderResult = { failed: true, provider: config.defaultProvider, code: "PROVIDER_UNAVAILABLE", reason: `No enabled/registered provider for worker role "${request.workerRole}" at tier ${state.tierIndex}.` };
-      return { result, costRecord: buildCostRecord(result, "none", null, null, request.workerRole, request.lineageId), escalations: state.totalEscalations, finalTierIndex: null };
+      return { trail, result, costRecord: buildCostRecord(result, "none", null, null, request.workerRole, request.lineageId), escalations: state.totalEscalations, finalTierIndex: null };
     }
 
     state.attemptsOnTier += 1;
-    const result = await decision.provider.execute({ ...request, model: request.model ?? decision.model });
+    const raw = await decision.provider.execute({ ...request, model: request.model ?? decision.model });
+    trail.push(raw.failed
+      ? { tier: decision.tierIndex, providerId: decision.providerId, ok: false, code: raw.code, reason: raw.reason }
+      : { tier: decision.tierIndex, providerId: decision.providerId, ok: true, model: raw.model });
+    const result = withTrail(raw);
     lastResult = result;
+
+    // A provider that already retried and walked its own fallback chain (the Workforce) has failed for real: never retry it
+    // as "low confidence". Move to the next configured tier if there is one, else report the failure.
+    if (result.failed && decision.provider.retriesInternally) {
+      if (selectProvider(request, registry, config, nextTier(decision))) {
+        state.tierIndex = nextTier(decision);
+        state.attemptsOnTier = 0;
+        state.totalEscalations += 1;
+        continue;
+      }
+      return { trail, result, costRecord: buildCostRecord(result, decision.model, null, null, request.workerRole, request.lineageId), escalations: state.totalEscalations, finalTierIndex: decision.tierIndex };
+    }
 
     const { confidence } = normalizeConfidence(result);
 
@@ -65,7 +101,7 @@ export async function runAiJob(
     // confidence and must never be accepted through this path.
     if (!result.failed && confidence === "UNKNOWN" && config.acceptUnknownConfidenceOnSuccess) {
       const costRecord = buildCostRecord(result, result.model || decision.model, result.usage.promptTokens, result.usage.completionTokens, request.workerRole, request.lineageId);
-      return { result, costRecord, escalations: state.totalEscalations, finalTierIndex: decision.tierIndex };
+      return { trail, result, costRecord, escalations: state.totalEscalations, finalTierIndex: decision.tierIndex };
     }
 
     const escalationDecision = decideEscalation(confidence, state, {
@@ -76,7 +112,7 @@ export async function runAiJob(
 
     if (escalationDecision.action === "ACCEPT") {
       const costRecord = buildCostRecord(result, decision.model, result.failed ? null : result.usage.promptTokens, result.failed ? null : result.usage.completionTokens, request.workerRole, request.lineageId);
-      return { result, costRecord, escalations: state.totalEscalations, finalTierIndex: decision.tierIndex };
+      return { trail, result, costRecord, escalations: state.totalEscalations, finalTierIndex: decision.tierIndex };
     }
     if (escalationDecision.action === "RETRY_SAME_TIER") {
       continue;
@@ -89,7 +125,7 @@ export async function runAiJob(
     }
     // GIVE_UP
     const costRecord = buildCostRecord(result, decision.model, result.failed ? null : result.usage.promptTokens, result.failed ? null : result.usage.completionTokens, request.workerRole, request.lineageId);
-    return { result, costRecord, escalations: state.totalEscalations, finalTierIndex: decision.tierIndex };
+    return { trail, result, costRecord, escalations: state.totalEscalations, finalTierIndex: decision.tierIndex };
   }
 }
 

@@ -56,7 +56,9 @@ test("model routing: Workforce goes first for every role except finance; fallbac
   const employee = (missionType: string, workerRole: string) => (wf.resolveEmployee({ workerRole, taskType: MISSION_TASK_TYPE[missionType] } as never) as { employee: string }).employee;
   assert.equal(employee("dossier_profile", "researcher"), "scout");
   assert.equal(employee("dossier_audit", "analyst"), "business_analyst");
-  for (const t of ["dossier_swot", "dossier_growth", "dossier_plan"]) assert.equal(employee(t, "planner"), "ceo_master_planner");
+  for (const t of ["dossier_growth", "dossier_plan"]) assert.equal(employee(t, "planner"), "ceo_master_planner");
+  for (const t of ["dossier_competitors", "dossier_market", "dossier_swot"]) assert.equal(employee(t, "planner"), "business_analyst");
+  assert.equal(employee("dossier_campaign", "writer"), "writer");
 });
 
 test("mission result: honest outcome for completed, empty, failed, pending; separates results from approval", async () => {

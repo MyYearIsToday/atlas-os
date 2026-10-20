@@ -5,7 +5,7 @@ import type { AIProvider } from "../src/workforce/provider-interface";
 import type { AIJobRequest, ProviderId } from "../src/workforce/provider-types";
 import { defaultWorkforceConfig } from "../src/workforce/workforce-config";
 import { safeFetch } from "./atlas/source-tools";
-import { WorkforceProvider, withWorkforceRouting } from "./workforce/workforce-provider";
+import { WorkforceProvider, withFreeWorkforceRouting } from "./workforce/workforce-provider";
 import { AtlasOrchestrator } from "../src/orchestrator/orchestrator";
 import { InMemoryBusinessRepository } from "../src/services/scout/business-repository";
 import { createScoutDiscoveryProvider } from "../src/services/scout/discovery-provider-factory";
@@ -35,7 +35,7 @@ import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/we
 import { MultimodalIntelligenceService } from "../src/services/multimodal-intelligence/service";
 import { buildBusinessView } from "./atlas/business-view";
 import { ProcessController, buildCandidateView, readDossier, readMissionResult, startCandidate, type ActionContext } from "./atlas/scout-actions";
-import { DossierEngine } from "./atlas/dossier";
+import { DossierEngine, missionContext } from "./atlas/dossier";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 
 let scoutDiscoveryEnabled = false;
@@ -360,6 +360,16 @@ export function createAiProxyServer(
         return;
       }
 
+      if (method === "GET" && url === "/api/atlas/backup") {
+        // Read-only logical export of the whole Atlas database. Gateway-protected like every Atlas route; never contains env/secrets.
+        const p = atlasPipeline?.persistence;
+        if (!p?.backup) { sendJson(res, 503, { error: { code: "unavailable", message: "Backup needs the PostgreSQL store" } }); logRequest(method, url, 503, Date.now() - started); return; }
+        sendJson(res, 200, await p.backup());
+        console.log("[atlas-backup] exported");
+        logRequest(method, url, 200, Date.now() - started);
+        return;
+      }
+
       if (method === "GET" && url === "/api/atlas/businesses") {
         if (!atlasPipeline) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline is not enabled" } }); logRequest(method, url, 503, Date.now() - started); return; }
         const { deps, autonomy } = atlasPipeline;
@@ -449,9 +459,9 @@ export function createAiProxyServer(
           logRequest(method, url, 400, Date.now() - started);
           return;
         }
-        const summary = await atlasPipeline.runner.run(body.taskId, { approvedByHuman: body.approvedByHuman === true, approvedByCeo: body.approvedByCeo === true });
+        const summary = await atlasPipeline.runner.runBounded(body.taskId, { approvedByHuman: body.approvedByHuman === true, approvedByCeo: body.approvedByCeo === true });
         await atlasPipeline.persistence?.flush(); // the response is sent only after the execution result has been written
-        const status = summary.outcome === "NOT_FOUND" ? 404 : summary.outcome === "DISABLED" ? 409 : 200;
+        const status = summary.outcome === "NOT_FOUND" ? 404 : summary.outcome === "DISABLED" ? 409 : summary.outcome === "RUNNING" ? 202 : 200;
         console.log(`[atlas-pipeline][execute] outcome=${summary.outcome} executed=${summary.executed}`);
         sendJson(res, status, summary);
         logRequest(method, url, status, Date.now() - started);
@@ -596,8 +606,14 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       if (multimodalEnabled && providers?.workforce) {
         pipelineDeps.multimodalIntelligence = new MultimodalIntelligenceService(providers.workforce);
       }
-      const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: withWorkforceRouting(defaultWorkforceConfig, Boolean(providers?.workforce) && executionEnabled), ledger, orchestrator });
-      const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled });
+      const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: withFreeWorkforceRouting(defaultWorkforceConfig, Boolean(providers?.workforce) && executionEnabled), ledger, orchestrator,
+        // Recovery attempts after unusable output skip the models that already failed (free-only chains; nothing paid is ever added).
+        hintsProvider: (task) => dossierEngine?.hintsFor(task.taskId),
+        // Approved non-stage missions get the business record, approved-source evidence and prior dossier outputs, not just a title.
+        contextProvider: (task) => { if (!task.clientId || String(task.missionType ?? "").startsWith("dossier_") && task.missionType !== "dossier_followup") return undefined; const b = pipelineDeps!.store.businesses.get(task.clientId); return b ? missionContext(b, pipelineDeps!.store.dossiers.get(task.clientId), pipelineDeps!.store) : undefined; } });
+      const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled,
+        afterRun: () => persistence?.flush() ?? Promise.resolve(),
+        blockedBy: (task) => { const d = task.clientId ? pipelineDeps!.store.dossiers.get(task.clientId) : undefined; return d && d.status === "awaiting_sources" && !String(task.missionType ?? "").startsWith("dossier_") ? "Blocked: approve this business's research sources first" : null; } });
       pipelineDeps.onMissionCreated = (task) => runner.autoExecute(task);
       // Autonomy layer (Objectives 4-10): lifecycles, approvals, loop, observability. The loop itself starts only when ATLAS_AUTONOMY_ENABLED=true.
       const lifecycle = new LifecycleStore(persistence ?? undefined);
@@ -606,7 +622,7 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       const prospects = new ProspectService(lifecycle, undefined, resolveContact);
       const delivery = new DeliveryService(lifecycle, prospects, pipelineDeps.missionQueue);
       const revenue = new RevenueService(lifecycle, prospects, ledger);
-      const approvals = new ApprovalService({ lifecycle, prospects, delivery, revenue, missionQueue: pipelineDeps.missionQueue, missionOutputs: pipelineDeps.store.missionOutputs, runMission: (taskId, approval) => runner.run(taskId, approval) });
+      const approvals = new ApprovalService({ lifecycle, prospects, delivery, revenue, missionQueue: pipelineDeps.missionQueue, missionOutputs: pipelineDeps.store.missionOutputs, runMission: (taskId, approval) => runner.runBounded(taskId, approval) });
       const metricInputs = () => ({
         prospects: [...lifecycle.prospects.values()], engagements: [...lifecycle.engagements.values()], invoices: [...lifecycle.invoices.values()], tasks: pipelineDeps!.missionQueue.getSnapshot(), ledger: ledger.list(),
         approvals: [...lifecycle.approvals.values()], businesses: [...pipelineDeps!.store.businesses.values()].map((b) => ({ id: b.id, website: b.website, createdAt: b.createdAt })), observations: pipelineDeps!.store.observations,
@@ -617,10 +633,7 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       const searchProvider = new TavilyWebDiscoveryProvider();
       dossierEngine = new DossierEngine({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 6 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })),
         fetchDoc: safeFetch,
-        analyzeImage: pipelineDeps.multimodalIntelligence ? async (businessId, img) => {
-          const r = await pipelineDeps!.multimodalIntelligence!.analyze({ businessId, sourceType: "image", sourceReference: img.url, mimeType: img.mimeType, dataUrl: img.dataUrl });
-          return { status: r.status, observations: r.observations.map((o) => ({ observation: o.observation, category: o.category, confidence: o.confidence })), generatedBy: "workforce:vision_employee" };
-        } : undefined });
+        inspectImage: pipelineDeps.multimodalIntelligence?.inspect ? (businessId, req) => pipelineDeps!.multimodalIntelligence!.inspect!({ businessId, prompt: req.prompt, mimeType: req.mimeType, dataUrl: req.dataUrl, ...(req.excludeModels ? { excludeModels: req.excludeModels } : {}), ...(req.references ? { references: req.references } : {}) }) : undefined });
       const engine = dossierEngine;
       const autonomyScheduler = new AutonomyScheduler(async (trigger) => { const c = await runAutonomyCycle(cycleDeps, trigger); if (trigger === "scheduled") await engine.tick(3).catch((e) => console.error(`[atlas-dossier] tick error: ${e instanceof Error ? e.message : "unknown"}`)); await persistence?.flush(); return c; }, (e) => console.error(`[atlas-autonomy] cycle error: ${e instanceof Error ? e.message : "unknown"}`));
       const autonomyEnabled = process.env.ATLAS_AUTONOMY_ENABLED === "true";

@@ -20,9 +20,12 @@ import { DossierEngine, STAGES } from "./dossier";
  */
 const REPLY: Record<string, unknown> = {
   "Business profile": { name: "Joe's Cafe", industry: "cafe", productsServices: ["coffee"], location: "Accra", targetAudience: "locals", website: "https://joescafe.example", socialAccounts: [], brandNotes: "", facts: [{ claim: "Sells coffee", basis: "verified", sourceRefs: ["S1"], confidence: "medium" }], unknowns: [] },
-  "Brand and digital presence audit": { summary: "Has a basic site", strengths: [{ text: "Has a website", basis: "verified", sourceRefs: ["S1"] }], weaknesses: [], gaps: [{ text: "No social accounts found", basis: "unknown", sourceRefs: [] }], improvementOpportunities: [] },
+  "Situation and digital presence audit": { summary: "Has a basic site", strengths: [{ text: "Has a website", basis: "verified", sourceRefs: ["S1"] }], weaknesses: [], gaps: [{ text: "No social accounts found", basis: "unknown", sourceRefs: [] }], improvementOpportunities: [] },
+  "Competitor analysis": { shortlist: [], whitespace: [], threats: [], gaps: ["No competitor was approved: competitors were not established."], conflicts: [], method: "none approved" },
+  "Market and audience analysis": { audience: [], localContext: [], trends: [], opportunities: [], threats: [], barriers: [], unknowns: ["audience data not found in approved sources"], estimates: [] },
+  "Campaign plan and content drafts": { objective: "visibility", pillars: [], channels: [], campaigns: [{ name: "Local awareness", objective: "be found", audience: "locals", message: "m", callToAction: "visit", channels: ["Instagram"], kpis: [{ metric: "profile visits", measurement: "platform insights", baseline: "unknown" }] }], sequence: [], content: [{ campaign: "Local awareness", platform: "Instagram", format: "post", draft: "Fresh coffee in Accra", creativeBrief: "b" }], assumptions: [] },
   "SWOT analysis": { strengths: [{ text: "Local niche", basis: "hypothesis", sourceRefs: [] }], weaknesses: [], opportunities: [], threats: [] },
-  "Growth opportunities": { recommendations: [{ title: "Claim social handles", area: "social", rationale: "none found", priority: "high", effort: "low", basis: "hypothesis", sourceRefs: [] }] },
+  "Strategic opportunities and recommendations": { recommendations: [{ title: "Claim social handles", area: "social", rationale: "none found", priority: "high", effort: "low", basis: "hypothesis", sourceRefs: [] }] },
   "Action plan and follow-ups": { dossierSummary: "ok", actionPlan: [{ title: "Claim handles", description: "d", owner: "Atlas", timeframe: "1 week" }], followUps: [{ title: "Email the owner", description: "draft", assignedAI: "closer", external: true }], limitations: [] },
 };
 
@@ -53,15 +56,12 @@ test("real MissionRunner/Workforce runs every dossier stage; results persist on 
 
   const engine = new DossierEngine({ store: deps.store, missionQueue: deps.missionQueue, runner, search: async () => [{ title: "Joe's Cafe Accra", url: "https://example.com/joes", snippet: "coffee shop" }], retryCooldownMs: 0 });
   engine.ensure(business); engine.kick(id); await engine.idle();
-  assert.equal(engine.get(id)!.status, "awaiting_sources", "research waits for the operator before any AI stage");
-  assert.equal(deps.missionQueue.getSnapshot().filter((m) => m.missionType === "dossier_profile").length, 0);
-  for (const src of engine.get(id)!.sources.filter((u) => u.decision === "pending")) await engine.applyAction(id, { action: "decide", sourceId: src.id, decision: "approved" });
-  await engine.applyAction(id, { action: "approve" }); await engine.idle();
+  assert.equal(engine.get(id)!.sourceApproval?.mode, "auto", "no operator step: sources were validated automatically");
 
   const d = engine.get(id)!;
   assert.equal(d.status, "completed");
-  assert.deepEqual(stages, ["Business profile", "Brand and digital presence audit", "SWOT analysis", "Growth opportunities", "Action plan and follow-ups"]);
-  for (const s of STAGES.filter((x) => x.id !== "research")) {
+  assert.deepEqual(stages, ["Business profile", "Situation and digital presence audit", "Competitor analysis", "Market and audience analysis", "SWOT analysis", "Strategic opportunities and recommendations", "Campaign plan and content drafts", "Action plan and follow-ups"]);
+  for (const s of STAGES.filter((x) => x.id !== "research" && x.id !== "competitor_discovery")) {
     const t = deps.missionQueue.getSnapshot().find((m) => m.taskId === d.stages[s.id].taskId)!;
     assert.equal(t.status, "Completed", s.id);
     assert.equal(t.executionHistory.at(-1)?.outcome, "SUCCEEDED");
@@ -82,5 +82,5 @@ test("real MissionRunner/Workforce runs every dossier stage; results persist on 
   assert.notEqual(deps.missionQueue.getSnapshot().find((t) => t.taskId === fu.taskId)!.status, "Completed");
   const autonomous = await runner.run(fu.taskId, {}, { autonomous: true });
   assert.equal(autonomous.outcome, "BLOCKED", "autonomous runs never execute a follow-up");
-  assert.equal(stages.length, 5, "no AI call was made for the follow-up");
+  assert.equal(stages.length, 8, "no AI call was made for the follow-up");
 });

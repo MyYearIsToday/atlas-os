@@ -1,7 +1,7 @@
-import type { AutonomousWorkforce, MissionLifecycleDispatcher, MissionRunResult } from "./autonomous-workforce";
+import { MISSION_TASK_TYPE, type AutonomousWorkforce, type MissionLifecycleDispatcher, type MissionRunResult } from "./autonomous-workforce";
 import type { MissionQueueRepository, Task } from "../services/mission-queue";
 import type { OperationalLedger } from "../services/finance/ledger";
-import type { PipelineStore } from "./atlas-pipeline";
+import type { PipelineStore, RoutingRecord } from "./atlas-pipeline";
 import { INTERNAL_AUDIT_SUMMARY, DOSSIER_MISSION_TYPES } from "./atlas-pipeline";
 
 /**
@@ -33,15 +33,39 @@ export interface MissionRunnerOptions {
   store: PipelineStore;
   executionEnabled: boolean;
   now?: () => Date;
+  /** Returns a reason when a prerequisite (e.g. source approval) is incomplete; the mission then does not execute. */
+  blockedBy?: (task: Task) => string | null;
+  /** Called after a run settles (success or failure), including runs that outlive the HTTP request. */
+  afterRun?: () => Promise<void>;
 }
 
 export interface MissionRunSummary {
   taskId: string;
   executed: boolean;
-  outcome: MissionRunResult["outcome"] | "DISABLED" | "NOT_FOUND";
+  outcome: MissionRunResult["outcome"] | "DISABLED" | "NOT_FOUND" | "RUNNING";
   reason?: string;
   costUsd?: number;
   completedEventDispatched?: boolean;
+}
+
+type WfMeta = { employee?: string; routedBy?: string; usedFallback?: boolean; taskType?: string | null; selected?: { providerId: string; model: string } | null; attempts?: Array<{ providerId: string; model: string; outcome: string; status?: number; ms: number }> };
+
+/** Builds the persisted routing record and a label that always names the model that ACTUALLY answered. */
+export function describeRouting(r: { provider: string; model: string }, taskType: string | null): { label: string; record: RoutingRecord } {
+  const x = r as unknown as { workforce?: WfMeta; routing?: { trail?: Array<{ tier: number; providerId: string; ok: boolean; model?: string; code?: string; reason?: string }> } };
+  const wf = x.workforce;
+  const attempts = (wf?.attempts ?? []).map((a) => ({ provider: a.providerId, model: a.model, outcome: a.outcome, ...(a.status ? { status: a.status } : {}), ms: a.ms }));
+  const failed = attempts.filter((a) => a.outcome !== "ok");
+  const record: RoutingRecord = {
+    taskType: wf?.taskType ?? taskType, employee: wf?.employee ?? null, routedBy: wf?.routedBy ?? null,
+    selected: wf?.selected ? { provider: wf.selected.providerId, model: wf.selected.model } : null,
+    actual: { provider: r.provider, model: r.model }, usedFallback: Boolean(wf?.usedFallback) || (x.routing?.trail ?? []).some((t) => !t.ok),
+    succeeded: true, attempts,
+    tiers: (x.routing?.trail ?? []).map((t) => ({ tier: t.tier, provider: t.providerId, ok: t.ok, ...(t.model ? { model: t.model } : {}), ...(t.code ? { code: t.code } : {}), ...(t.reason ? { reason: t.reason.slice(0, 300) } : {}) })),
+  };
+  const base = `${r.provider}/${r.model}${wf?.employee ? ` via workforce:${wf.employee}` : ""}`;
+  const label = record.usedFallback ? `${base} (FALLBACK${record.selected ? `; first choice was ${record.selected.provider}/${record.selected.model}` : ""}${failed.length ? `; ${failed.length} failed attempt${failed.length === 1 ? "" : "s"}` : ""})` : base;
+  return { label, record };
 }
 
 export class MissionRunner {
@@ -61,7 +85,27 @@ export class MissionRunner {
     }
   }
 
+  private inFlight = new Map<string, Promise<MissionRunSummary>>();
+
+  /** One execution per mission at a time: repeated approvals, retries and scheduler overlap join nothing and start nothing. */
   async run(taskId: string, approval: { approvedByHuman?: boolean; approvedByCeo?: boolean }, mode: { autonomous?: boolean } = {}): Promise<MissionRunSummary> {
+    if (this.inFlight.has(taskId)) return { taskId, executed: false, outcome: "RUNNING", reason: "this mission is already running; no second execution was started" };
+    const p = this.execute(taskId, approval, mode).finally(async () => { this.inFlight.delete(taskId); try { await this.options.afterRun?.(); } catch { /* persistence errors are reported by the persistence layer */ } });
+    this.inFlight.set(taskId, p);
+    return p;
+  }
+
+  /** Starts the run and answers within waitMs. A slower run keeps going on the server; the result is persisted and viewable. */
+  async runBounded(taskId: string, approval: { approvedByHuman?: boolean; approvedByCeo?: boolean }, waitMs = 15_000): Promise<MissionRunSummary> {
+    const started = this.inFlight.has(taskId);
+    const run = this.run(taskId, approval);
+    const timer = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), waitMs));
+    const first = await Promise.race([run, timer]);
+    if (first !== "timeout") return first;
+    return { taskId, executed: false, outcome: "RUNNING", reason: started ? "already running" : "running on the server; open View results to follow it" };
+  }
+
+  private async execute(taskId: string, approval: { approvedByHuman?: boolean; approvedByCeo?: boolean }, mode: { autonomous?: boolean } = {}): Promise<MissionRunSummary> {
     const { store, missionQueue, ledger, dispatcher, workforce } = this.options;
     const task = missionQueue.getSnapshot().find((t) => t.taskId === taskId);
     if (!task) return { taskId, executed: false, outcome: "NOT_FOUND", reason: "Task not found" };
@@ -72,6 +116,11 @@ export class MissionRunner {
     }
     if (mode.autonomous && (task.approvalRequired !== "Auto" || !task.missionType || !AUTONOMOUS_SAFE_MISSION_TYPES.has(task.missionType))) {
       return { taskId, executed: false, outcome: "BLOCKED", reason: "mission is not eligible for autonomous execution" };
+    }
+    const blocker = this.options.blockedBy?.(task);
+    if (blocker) {
+      store.record({ stage: "execution", event: "MissionExecution", businessId: task.clientId, handler: "mission-runner", state: "blocked by dependency", error: blocker });
+      return { taskId, executed: false, outcome: "BLOCKED", reason: blocker };
     }
     if (!this.options.executionEnabled) {
       store.record({ stage: "execution", event: "MissionExecution", businessId: task.clientId, handler: "mission-runner", state: "refused: mission execution is disabled", error: "ATLAS_MISSION_EXECUTION_ENABLED is not true" });
@@ -86,10 +135,17 @@ export class MissionRunner {
     }
 
     const providerResult = result.result && "text" in result.result ? result.result : undefined;
+    if (!providerResult?.text?.trim() || providerResult.text.trim().length < 20) {
+      // "Completed" must mean a real output exists. Nothing usable was produced, so the mission is Failed, not Completed.
+      const reason = "the provider returned no usable output";
+      await missionQueue.update(taskId, { status: "Failed", completedAt: null, lastFailureReason: reason });
+      store.record({ ...base, state: "failed: no usable output", error: reason });
+      return { taskId, executed: false, outcome: "FAILED", reason };
+    }
     if (providerResult) {
       // Model output is a work product, never evidence: it is stored apart and flagged accordingly.
-      const wf = (providerResult as { workforce?: { employee?: string; usedFallback?: boolean } }).workforce;
-      store.missionOutputs.set(taskId, { generatedBy: `${providerResult.provider}/${providerResult.model}${wf?.employee ? ` via workforce:${wf.employee}${wf.usedFallback ? " (fallback)" : ""}` : ""}`, text: providerResult.text, isEvidence: false });
+      const routing = describeRouting(providerResult, result.task.missionType ? MISSION_TASK_TYPE[result.task.missionType] ?? null : null);
+      store.missionOutputs.set(taskId, { generatedBy: routing.label, text: providerResult.text, isEvidence: false, routing: routing.record });
     }
     const transactions = ledger.list().filter((t) => t.evidenceRefs.includes(`lineage:${result.lineageId}`));
     const day = (this.options.now?.() ?? new Date()).toISOString().slice(0, 10);

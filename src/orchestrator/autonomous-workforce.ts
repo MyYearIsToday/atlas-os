@@ -53,6 +53,10 @@ export interface AutonomousWorkforceOptions {
   maxRetries?: number;
   now?: () => Date;
   executeJob?: MissionJobExecutor;
+  /** Extra, read-only context for a mission (business record, approved evidence, prior stage outputs). */
+  contextProvider?: (task: Task) => string | undefined;
+  /** Optional routing hints for a mission (e.g. models to avoid on a recovery attempt). */
+  hintsProvider?: (task: Task) => { excludeModels?: string[] } | undefined;
 }
 
 export interface MissionExecutionOptions {
@@ -103,11 +107,14 @@ function nextMissionLineage(taskId: string): string {
  * Evidence evaluation and strategy go to the strongest reasoning employee, simple extraction stays on the cheaper research employee.
  */
 export const MISSION_TASK_TYPE: Record<string, string> = {
-  dossier_profile: "research",
+  dossier_profile: "deep_research",
   dossier_audit: "business_analysis",
-  dossier_swot: "long_reasoning",
-  dossier_growth: "long_reasoning",
-  dossier_plan: "long_reasoning",
+  dossier_competitors: "competitor_analysis",
+  dossier_market: "market_analysis",
+  dossier_campaign: "writing",
+  dossier_swot: "business_analysis",
+  dossier_growth: "strategy",
+  dossier_plan: "strategy",
   dossier_followup: "research",
 };
 
@@ -252,7 +259,10 @@ export class AutonomousWorkforce {
       const request: AIJobRequest = {
         workerRole,
         ...(taskType ? { taskType } : {}),
-        task: `${task.title}\n\n${task.description}`,
+        ...((() => { const h = this.options.hintsProvider?.(task); return h?.excludeModels?.length ? { excludeModels: h.excludeModels } : {}; })()),
+        // Structured dossier stages return long JSON; the providers' default of 1024 tokens truncated it.
+        ...(task.missionType && task.missionType.startsWith("dossier_") ? { maxTokens: 6000 } : {}),
+        task: `${task.title}\n\n${task.description}${(() => { const c = this.options.contextProvider?.(task); return c ? `\n\n${c}` : ""; })()}`,
         priority: priorityValue[task.priority],
         confidenceTarget: this.options.workforceConfig.escalationConfidenceThreshold,
         budgetLimitUsd: options.budgetLimitUsd ?? this.options.workforceConfig.dailyCostLimitUsd,
