@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import type { PipelineStore } from "../../src/orchestrator/atlas-pipeline";
 import type { BusinessIntelligence } from "../../src/services/evidence/business-intelligence";
 import type { MissionQueueRepository, Task } from "../../src/services/mission-queue";
-import type { Dossier, FollowUpRef, ImageRef, SourceRef, StageId, StageRecord } from "../../src/orchestrator/dossier-types";
+import { DEFAULT_IMAGE_RIGHTS, type Dossier, type FollowUpRef, type ImageAssessment, type ImageRef, type SourceRef, type StageId, type StageRecord } from "../../src/orchestrator/dossier-types";
 import { recoverJsonObject, validateShape } from "./json-recovery";
 import { decideBusinessSource, decideCompetitorSource, detectIdentityAmbiguity, evidenceLevel, industryTokens } from "./source-validation";
+import { buildAssociationPrompt, decideImage, parseAssociation, sniffImage, type BusinessIdentity } from "./image-association";
 import { classifySource, extractImages, htmlMeta, htmlTitle, htmlToText, normalizeUrl, quoteSupported, scoreRelevance, type FetchDoc } from "./source-tools";
 
 /**
@@ -29,7 +30,8 @@ export interface DossierDeps {
   /** Bounded, SSRF-safe page/image fetcher (injected for tests). Without it pages are not read and nothing can be verified. */
   fetchDoc?: FetchDoc;
   /** Optional vision analysis of an operator-confirmed image (existing multimodal service). */
-  analyzeImage?: (businessId: string, img: { url: string; mimeType: string; dataUrl: string }) => Promise<{ status: string; observations: Array<{ observation: string; category: string; confidence: string }>; generatedBy?: string }>;
+  /** Vision call (the Workforce vision employee). Returns raw text for Atlas to validate; absent when image analysis is not enabled. */
+  inspectImage?: (businessId: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[] }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }>;
   flush?: () => Promise<void>;
   now?: () => string;
   /** Concurrent businesses worked on in this process (free-tier memory). */
@@ -45,6 +47,10 @@ const asCtx = (c: EvidenceCtx | Set<string>): EvidenceCtx => (c instanceof Set ?
 const AGENTS = new Set(["scout", "builder", "operator", "closer"]); // never "finance"
 const MAX_STAGE_ATTEMPTS = 3;
 const MAX_RECOVERY_ATTEMPTS = 3;
+const IMAGE_CAP = 12;
+const IMAGE_RECHECK_MS = 7 * 24 * 3600 * 1000;
+const IMAGE_MAX_BYTES = 1_000_000;
+const IMAGE_VISION_PER_RUN = 8;
 const MAX_FOLLOW_UPS = 5;
 
 /** dependsOn must be completed. softDependsOn only has to be settled (completed OR given up as blocked), so one blocked stage never halts the stages that can still be produced without it. */
@@ -213,12 +219,12 @@ function contextBlock(b: BusinessIntelligence, d: Dossier, store: PipelineStore,
   const comp = d.sources.filter((s) => s.decision === "approved" && s.role === "competitor").slice(0, 8).map((s) => `[${s.id}] COMPETITOR CANDIDATE — ${clip(s.title, 120)} — ${s.url}\n    PAGE TEXT: ${s.pageText ? `"${clip(s.pageText, 1500)}"` : "NOT READ: nothing can be verified from this source"}`).join("\n");
   const sources = approved.map((s) => `[${s.id}] ${s.official ? "OFFICIAL " : ""}${s.kind ?? "other"}${s.check?.reason?.startsWith("meta_only") ? " (public description tags only)" : ""} — ${clip(s.title, 120)} — ${s.url}\n    search snippet (not evidence): ${clip(s.snippet, 250) || "none"}\n    PAGE TEXT: ${s.pageText ? `"${clip(s.pageText, 2200)}"` : "NOT READ (page could not be fetched): nothing can be verified from this source"}`).join("\n") || "none approved: every claim must be hypothesis or unknown; state which sources are needed";
   const confirmed = (d.images ?? []).filter((i) => i.decision === "confirmed");
-  const visual = confirmed.map((i) => `[${i.id}] ${i.role} from ${i.pageUrl} (${i.url}) — ${i.analysis ? (i.analysis.status === "analyzed" ? i.analysis.observations.map((o) => `${o.category}: ${o.observation} (${o.confidence})`).join("; ") || "analysed, no observations" : `not analysed: ${i.analysis.reason ?? i.analysis.status}`) : "not analysed"}`).join("\n");
+  const visual = confirmed.map((i) => `[${i.id}] ${i.assessment?.imageType ?? i.role} from ${i.pageUrl} (${i.url}) — belongs to the business: ${i.decidedBy === "operator" ? "confirmed by the operator" : `judged by AI (${i.decisionReason ?? "evidence recorded"})`}; reuse rights: ${i.rights.status} — ${i.analysis ? (i.analysis.status === "analyzed" ? i.analysis.observations.map((o) => `${o.category}: ${o.observation} (${o.confidence})`).join("; ") || "analysed, no observations" : `not analysed: ${i.analysis.reason ?? i.analysis.status}`) : "not analysed"}`).join("\n");
   const prior = STAGES.filter((s) => s.id !== "research" && s.id !== "competitor_discovery" && STAGES.findIndex((x) => x.id === s.id) < STAGES.findIndex((x) => x.id === upTo) && d.stages[s.id].output)
     .map((s) => `## ${s.title} (already produced)\n${clip(JSON.stringify(d.stages[s.id].output), 3500)}`).join("\n\n");
   const comp0 = d.stages.competitors;
   const unavailable = ["market", "swot", "growth", "campaign", "plan"].includes(upTo) && comp0.status === "blocked" ? `\n\n--- COMPETITOR ANALYSIS: NOT AVAILABLE ---\nIt could not be produced (${comp0.error ?? "gave up after repeated attempts"}). Say that competitors are not established; do not invent them.` : "";
-  return [`--- BUSINESS RECORD ---\n${record}`, `--- OBSERVED EVIDENCE (collected by Atlas) ---\n${observed}`, `--- OPPORTUNITY SCORE ---\n${score ? (score.overallScore === null ? "withheld: not enough observed evidence (do not estimate one)" : String(score.overallScore)) : "not calculated"}`, `--- APPROVED SOURCES (validated automatically for this business, or approved by the operator; the only citable sources) ---\n${sources}`, ...(comp && !["profile", "audit"].includes(upTo) ? [`--- APPROVED COMPETITOR SOURCES (validated automatically or approved by the operator; other businesses, never attribute their facts to this business) ---\n${comp}`] : []), ...(visual ? [`--- OPERATOR-CONFIRMED VISUAL BRAND ASSETS (cite as image ids; observations are unverified) ---\n${visual}`] : []), ...(prior ? [`--- PRIOR STAGES ---\n${prior}`] : []), `--- LIMITATIONS SO FAR ---\n${d.limitations.join("; ") || "none recorded"}`].join("\n\n") + unavailable;
+  return [`--- BUSINESS RECORD ---\n${record}`, `--- OBSERVED EVIDENCE (collected by Atlas) ---\n${observed}`, `--- OPPORTUNITY SCORE ---\n${score ? (score.overallScore === null ? "withheld: not enough observed evidence (do not estimate one)" : String(score.overallScore)) : "not calculated"}`, `--- APPROVED SOURCES (validated automatically for this business, or approved by the operator; the only citable sources) ---\n${sources}`, ...(comp && !["profile", "audit"].includes(upTo) ? [`--- APPROVED COMPETITOR SOURCES (validated automatically or approved by the operator; other businesses, never attribute their facts to this business) ---\n${comp}`] : []), ...(visual ? [`--- VISUAL OBSERVATIONS FROM IMAGES JUDGED TO BE THIS BUSINESS'S (AI readings: unverified hypotheses, never verified facts and never citable as evidence; do not assume any image may be reused in published marketing) ---\n${visual}`] : []), ...(prior ? [`--- PRIOR STAGES ---\n${prior}`] : []), `--- LIMITATIONS SO FAR ---\n${d.limitations.join("; ") || "none recorded"}`].join("\n\n") + unavailable;
 }
 
 /** Read-only context handed to approved non-stage missions: the same approved-source evidence the dossier stages use. */
@@ -399,8 +405,8 @@ export class DossierEngine {
         if (rel.relevance === "unrelated" && src.decision === "pending") src.decision = "rejected";
         src.official = src.official || (src.kind === "official_site" && rel.relevance === "match");
         if (rel.relevance !== "unrelated") for (const img of extractImages(doc.body, doc.finalUrl ?? src.url)) {
-          if (images.length >= 8 || images.some((i) => normalizeUrl(i.url) === normalizeUrl(img.url))) continue;
-          images.push({ id: `I${images.length + 1}`, url: img.url, pageUrl: src.url, sourceId: src.id, role: img.role, decision: "pending" } satisfies ImageRef);
+          if (images.length >= IMAGE_CAP || images.some((i) => normalizeUrl(i.url) === normalizeUrl(img.url))) continue;
+          images.push({ id: `I${images.length + 1}`, url: img.url, pageUrl: src.url, sourceId: src.id, role: img.role, decision: "pending", rights: { ...DEFAULT_IMAGE_RIGHTS } } satisfies ImageRef);
         }
       }
     }
@@ -429,13 +435,14 @@ export class DossierEngine {
       note(`This business has no website on record. ${socialApproved.length} social profile(s) were identified; ${full} readable in full, ${metaOnly} only through public description tags, ${socialApproved.length - full - metaOnly} not readable (social platforms usually require login). Post history, engagement and follower figures were NOT collected; findings about its social presence rest on what is listed here.`);
     } else if (!b.website && !approvedNow.length) note("This business has no website on record and no social profile could be identified from public search.");
     const ambiguity = detectIdentityAmbiguity(facts, mine);
-    st.output = { queries, searchStatus: status, ...(error ? { error } : {}), candidates: x.sources.length, matched: count("match"), possible: count("possible"), unrelated: count("unrelated"), pagesRead, imageCandidates: images.length, observedEvidenceItems: observed,
+    st.output = { queries, searchStatus: status, ...(error ? { error } : {}), candidates: x.sources.length, matched: count("match"), possible: count("possible"), unrelated: count("unrelated"), pagesRead, imageCandidates: images.length, imageSummary: imageSummary(x), observedEvidenceItems: observed,
       validation: { autoApproved: mine.filter((u) => u.decidedBy === "auto" && u.decision === "approved").length, autoRejected: mine.filter((u) => u.decidedBy === "auto" && u.decision === "rejected").length, needsConfirmation: mine.filter((u) => u.decision === "pending").length },
       evidence: approvedNow.map((u) => ({ id: u.id, kind: u.kind ?? "other", level: evidenceLevel(u), chars: u.pageText?.length ?? 0, ...(u.check?.reason ? { limit: u.check.reason } : {}) })),
       identity: ambiguity.ambiguous ? { status: "ambiguous", detail: ambiguity.detail } : { status: approvedNow.length ? "resolved" : "unconfirmed_no_sources" },
       guidance: ambiguity.ambiguous ? ambiguity.detail : approvedNow.length ? `${approvedNow.length} source(s) were validated automatically for internal use (${levels.filter((l) => l === "full_page").length} read in full). Research continues without waiting for you; you can still reject or add sources.` : "No source was validated, so research continues from the saved record only; add the official website or profile URLs to improve it." };
     if (ambiguity.ambiguous && x.sourceApproval?.status !== "approved") x.sourceApproval = { status: "awaiting", reason: "ambiguous_identity", ...(ambiguity.detail ? { detail: ambiguity.detail } : {}) };
     else if (x.sourceApproval?.status !== "approved") x.sourceApproval = { status: "approved", mode: "auto", approvedBy: "atlas:auto", approvedAt: this.now(), approvedCount: approvedNow.length };
+    await this.assessImages(b, x); // identity is settled (or paused) above; images from validated sources are checked against the business now
     st.status = "completed"; st.completedAt = this.now(); st.generatedBy = "atlas/server (source discovery, page reads, automatic validation; no AI model)";
   }
 
@@ -529,7 +536,7 @@ export class DossierEngine {
         const doc = await this.d.fetchDoc(added.url);
         if (doc.ok && doc.body) { added.pageText = clip(htmlToText(doc.body), 6000); added.confidence = "checked"; added.check = { status: "fetched", at: this.now() }; const t = htmlTitle(doc.body); if (t && !body.title) added.title = clip(t, 200);
           const images = (x.images ??= []);
-          for (const img of extractImages(doc.body, doc.finalUrl ?? added.url)) { if (images.length >= 12 || images.some((i) => normalizeUrl(i.url) === normalizeUrl(img.url))) continue; images.push({ id: `I${images.length + 1}`, url: img.url, pageUrl: added.url, sourceId: added.id, role: img.role, decision: "pending" }); } }
+          for (const img of extractImages(doc.body, doc.finalUrl ?? added.url)) { if (images.length >= IMAGE_CAP || images.some((i) => normalizeUrl(i.url) === normalizeUrl(img.url))) continue; images.push({ id: `I${images.length + 1}`, url: img.url, pageUrl: added.url, sourceId: added.id, role: img.role, decision: "pending", rights: { ...DEFAULT_IMAGE_RIGHTS } }); } }
         else added.check = { status: "failed", at: this.now(), reason: doc.reason ?? "unreadable" };
       }
       x.sources.push(added);
@@ -543,11 +550,23 @@ export class DossierEngine {
     } else if (action === "image") {
       const img = (x.images ?? []).find((i) => i.id === body.imageId);
       if (!img) return bad("unknown_image", 404);
-      if (!["confirmed", "rejected", "pending"].includes(String(body.decision))) return bad("invalid_decision");
-      img.decision = body.decision as ImageRef["decision"];
-      if (img.decision !== "confirmed") delete img.analysis;
-      // Research no longer waits for the operator, so a late confirmation is analysed immediately (it informs later work, not a stage that already ran).
-      else await this.analyzeImages(b, x);
+      if (!["confirmed", "rejected", "skipped", "pending"].includes(String(body.decision))) return bad("invalid_decision");
+      if (body.decision === "pending") { // reset: forget the earlier verdict and assess the image again
+        Object.assign(img, { decision: "pending", decidedBy: undefined, decisionReason: undefined, decidedAt: undefined }); delete img.assessment; delete img.analysis; delete img.duplicateOf;
+        await this.assessImages(b, x, { only: img.id });
+      } else {
+        Object.assign(img, { decision: body.decision as ImageRef["decision"], decidedBy: "operator", decisionReason: `decided by ${actor}`, decidedAt: this.now() });
+        if (img.decision === "rejected") delete img.analysis;
+        // Confirmed images still get their AI observations (a late confirmation informs later stages); the decision itself is the operator's and is never changed by the AI.
+        else if (img.decision === "confirmed" && !img.analysis) await this.assessImages(b, x, { only: img.id });
+      }
+    } else if (action === "image_rights") {
+      const img = (x.images ?? []).find((i) => i.id === body.imageId);
+      if (!img) return bad("unknown_image", 404);
+      if (!["unknown", "owner_permission", "licensed", "not_permitted"].includes(String(body.status))) return bad("invalid_rights");
+      img.rights = { status: body.status as ImageRef["rights"]["status"], note: clip(body.note, 300) || (body.status === "unknown" ? DEFAULT_IMAGE_RIGHTS.note : `recorded by ${actor}`), updatedBy: actor, updatedAt: this.now() };
+    } else if (action === "images_revalidate") {
+      await this.assessImages(b, x, { recheckAll: true });
     } else if (action === "approve") {
       if (x.sourceApproval?.status === "approved") return { status: 200, body: { ok: true, already: true } };
       if (x.stages.research.status !== "completed") return bad("research_not_finished", 409);
@@ -572,22 +591,108 @@ export class DossierEngine {
     return { ok: true };
   }
 
-  private async analyzeImages(b: BusinessIntelligence, x: Dossier) {
-    for (const img of (x.images ?? []).filter((i) => i.decision === "confirmed" && !i.analysis).slice(0, 4)) {
-      const fail = (status: "unavailable" | "failed", reason: string) => { img.analysis = { status, at: this.now(), reason, observations: [] }; };
-      if (!this.d.analyzeImage) { fail("unavailable", "image analysis is not enabled on this server (needs ATLAS_MULTIMODAL_ENABLED=true and the AI Workforce)"); continue; }
-      if (!this.d.fetchDoc) { fail("unavailable", "image fetching is not available"); continue; }
-      const doc = await this.d.fetchDoc(img.url, { binary: true });
-      if (!doc.ok || !doc.bytes) { fail("failed", `image could not be retrieved (${doc.reason ?? "unreadable"})`); continue; }
-      const mimeType = (doc.contentType ?? "").split(";")[0].trim();
-      const dataUrl = `data:${mimeType};base64,${Buffer.from(doc.bytes).toString("base64")}`;
-      if (dataUrl.length > 180_000) { fail("unavailable", "image is larger than the analysis limit (about 130 KB); it can be reviewed visually but was not analysed"); continue; }
-      try {
-        const r = await this.d.analyzeImage(b.id, { url: img.url, mimeType, dataUrl });
-        img.analysis = r.status === "ANALYZED" ? { status: "analyzed", at: this.now(), observations: r.observations.slice(0, 8).map((o) => ({ observation: clip(o.observation, 300), category: clip(o.category, 30), confidence: clip(o.confidence, 10) })), ...(r.generatedBy ? { generatedBy: r.generatedBy } : {}) } : { status: "failed", at: this.now(), reason: `analysis returned ${r.status}`, observations: [] };
-      } catch (e) { fail("failed", `analysis failed (${clip(e instanceof Error ? e.message : e, 100)})`); }
+  /**
+   * Image-to-brand association. Retrieves each accessible image, shows the ACTUAL image to the vision model together with the confirmed
+   * identity, then decides in code (image-association.ts). Operator decisions are never overwritten; the same bytes are never judged
+   * twice (sha256); expired or changed URLs are revalidated. Retrieval or vision failures are recorded, never reported as a match,
+   * and the operator is asked only when looking at the image could resolve the uncertainty.
+   */
+  private async assessImages(b: BusinessIntelligence, x: Dossier, opts: { only?: string; recheckAll?: boolean } = {}) {
+    const images = (x.images ?? []).filter((i) => !opts.only || i.id === opts.only);
+    if (!images.length || x.sourceApproval?.status === "awaiting") return; // while the business identity is in question, nothing is assessed against it
+    const handles = x.sources.filter((u) => u.kind === "social" && u.decision === "approved").map((u) => { try { return new URL(u.url).pathname.split("/").filter(Boolean)[0] ?? ""; } catch { return ""; } }).filter(Boolean);
+    const identity: BusinessIdentity = { name: b.canonicalName, category: b.category, address: b.address, website: b.website, handles };
+    let vision = IMAGE_VISION_PER_RUN;
+    const ageOf = (iso?: string) => (iso ? Date.now() - Date.parse(iso) : Infinity);
+    for (const img of images) {
+      const src = x.sources.find((u) => u.id === img.sourceId);
+      const operator = img.decidedBy === "operator";
+      const forced = Boolean(opts.only) || Boolean(opts.recheckAll);
+      if (!operator && img.decision === "pending" && src?.decision === "rejected") { Object.assign(img, { decision: "rejected", decidedBy: "ai", decisionReason: "the page it came from was judged not to be this business", decidedAt: this.now() }); continue; }
+      const waiting = img.decision === "pending" && src?.decision !== "approved";
+      if (waiting) continue; // source not yet validated: nothing is assessed from an unvalidated page
+      const checkedAt = img.retrieval?.at ?? img.retrievedAt;
+      const stale = ageOf(checkedAt) > IMAGE_RECHECK_MS;
+      const decided = img.decision !== "pending";
+      const needsObservations = operator && img.decision === "confirmed" && !img.analysis && !img.assessment;
+      if (decided && !stale && !(forced && opts.recheckAll) && !needsObservations) continue;
+      if (img.decision === "pending" && img.retrieval?.status === "failed" && !stale && !forced) continue; // do not hammer an unreachable URL
+      if (img.duplicateOf && !stale && !forced) continue;
+
+      // ---- retrieve
+      const got = await this.retrieveImage(img);
+      if (!got.ok) {
+        img.retrieval = { status: "failed", reason: got.reason, at: this.now(), userCanResolve: got.userCanResolve };
+        if (decided) continue; // keep what was decided on the bytes we saw earlier; the failure is recorded
+        if (got.userCanResolve) Object.assign(img, { decision: "needs_user_confirmation", decisionReason: `${got.reason}. Atlas could not analyse it, but you can judge it by opening the image.`, decidedAt: this.now() });
+        continue;
+      }
+      const changed = Boolean(img.sha256) && img.sha256 !== got.sha256;
+      img.retrieval = { status: "ok", at: this.now(), userCanResolve: false };
+      img.retrievedAt = this.now(); img.mimeType = got.mime; img.bytes = got.bytes.length;
+      if (!changed && decided && !needsObservations) { img.sha256 = got.sha256; continue; } // revalidated: same bytes, decision stands
+      img.sha256 = got.sha256;
+      if (changed && decided) {
+        const was = operator ? "after you decided" : "since it was last assessed";
+        delete img.assessment; delete img.analysis; delete img.duplicateOf;
+        if (operator) { Object.assign(img, { decision: "needs_user_confirmation", decidedBy: undefined, decisionReason: `the image at this address changed ${was}; please confirm it again`, decidedAt: this.now() }); continue; }
+        Object.assign(img, { decision: "pending", decidedBy: undefined, decisionReason: undefined });
+      }
+      // ---- duplicates: the same bytes are judged once
+      const twin = images.find((o) => o !== img && o.sha256 === got.sha256 && o.id < img.id && !o.duplicateOf);
+      if (twin && twin.decision !== "pending") { Object.assign(img, { duplicateOf: twin.id, decision: twin.decision, decidedBy: "ai", decisionReason: `same file as ${twin.id} (${twin.decisionReason ?? twin.decision})`, decidedAt: this.now() }); continue; }
+      // ---- vision
+      if (!this.d.inspectImage) { Object.assign(img, { decision: needsObservations ? img.decision : "needs_user_confirmation", decisionReason: needsObservations ? img.decisionReason : "image analysis is not enabled on this server, so Atlas cannot check the image itself; you can judge it by looking", assessment: { at: this.now(), status: "unavailable", reason: "image analysis is not enabled on this server (needs ATLAS_MULTIMODAL_ENABLED=true and the AI Workforce)", attempts: [{ outcome: "unavailable" }] } as ImageAssessment }); continue; }
+      if (vision-- <= 0) continue; // bounded per run; the rest are assessed on the next pass
+      if (got.dataUrlChars > 1_400_000) { Object.assign(img, { decision: needsObservations ? img.decision : "needs_user_confirmation", decisionReason: needsObservations ? img.decisionReason : "the image is too large for AI analysis; you can judge it by opening it", assessment: { at: this.now(), status: "unavailable", reason: "image too large for analysis", attempts: [{ outcome: "unavailable" }] } as ImageAssessment }); continue; }
+      const ctx = { sourceKind: src?.kind, official: Boolean(src?.official), metaOnly: Boolean(src?.check?.reason?.startsWith("meta_only")), pageUrl: img.pageUrl, pageTitle: src?.title, pageExcerpt: src?.pageText?.slice(0, 300), role: img.role };
+      const prior = img.assessment?.attempts ?? [];
+      const attempts: ImageAssessment["attempts"] = [...prior];
+      let parsed: ReturnType<typeof parseAssociation> | undefined; let model: { provider?: string; model?: string } = {}; let lastError: string | undefined;
+      for (let n = 0; n < 2 && !parsed?.ok; n++) {
+        let r: Awaited<ReturnType<NonNullable<DossierDeps["inspectImage"]>>>;
+        try { r = await this.d.inspectImage(b.id, { prompt: buildAssociationPrompt(identity, ctx, n > 0, lastError), mimeType: got.mime, dataUrl: got.dataUrl, ...(n > 0 && model.model ? { excludeModels: [model.model] } : {}) }); }
+        catch (e) { r = { status: "PROVIDER_UNAVAILABLE", reason: clip(e instanceof Error ? e.message : e, 100) }; }
+        if (r.status !== "OK") { attempts.push({ outcome: "provider_failed", error: clip((r as { reason: string }).reason, 160) }); break; }
+        const ok = r as { text: string; provider: string; model: string }; model = { provider: ok.provider, model: ok.model };
+        parsed = parseAssociation(ok.text);
+        if (parsed.ok) attempts.push({ outcome: "ok", ...model }); else { lastError = parsed.error; attempts.push({ outcome: "invalid_output", error: parsed.error, ...model }); }
+      }
+      if (!parsed?.ok) {
+        const failures = attempts.filter((a) => a.outcome !== "ok").length;
+        const reason = attempts[attempts.length - 1]?.error ?? "no usable answer";
+        img.assessment = { at: this.now(), status: "failed", reason, attempts: attempts.slice(-8) };
+        if (needsObservations) { img.analysis = { status: "failed", at: this.now(), reason, observations: [] }; continue; }
+        // A transient vision failure is retried on a later pass; after repeated failures the operator is asked, because looking at the image can resolve it.
+        if (failures >= 3) Object.assign(img, { decision: "needs_user_confirmation", decisionReason: `the vision model could not produce a usable answer after ${failures} tries (${reason}); you can judge it by looking`, decidedAt: this.now() });
+        continue;
+      }
+      const a = parsed.value;
+      img.assessment = { at: this.now(), status: "assessed", ...model, association: a.association, confidence: a.confidence, reasoning: a.reasoning, imageType: a.imageType, visibleText: a.visibleText, supportingClues: a.supportingClues, conflictingClues: a.conflictingClues, attempts: attempts.slice(-8) };
+      img.role = img.role === "page_image" && a.imageType && a.imageType !== "other" ? a.imageType : img.role;
+      if (needsObservations) { img.analysis = { status: "analyzed", at: this.now(), generatedBy: model.model ? `${model.provider}/${model.model}` : "workforce:vision_employee", observations: a.observations }; continue; }
+      const v = decideImage(identity, a, ctx);
+      Object.assign(img, { decision: v.decision, decidedBy: "ai", decisionReason: v.reason, decidedAt: this.now() });
+      if (v.decision === "rejected") delete img.analysis;
+      else img.analysis = { status: "analyzed", at: this.now(), generatedBy: model.model ? `${model.provider}/${model.model}` : "workforce:vision_employee", observations: a.observations };
     }
+    const unchecked = (x.images ?? []).filter((i) => i.assessment && i.assessment.status !== "assessed" && i.decision !== "rejected").length;
+    const note = `${unchecked} image(s) could not be checked by AI (see each image's reason). They are not treated as belonging to the business unless you confirm them.`;
+    x.limitations = x.limitations.filter((l) => !/image\(s\) could not be checked by AI/.test(l));
+    if (unchecked) x.limitations.push(note);
     this.save(x);
+  }
+
+  private async retrieveImage(img: ImageRef): Promise<{ ok: true; bytes: Uint8Array; mime: "image/jpeg" | "image/png" | "image/webp"; sha256: string; dataUrl: string; dataUrlChars: number } | { ok: false; reason: string; userCanResolve: boolean }> {
+    if (!this.d.fetchDoc) return { ok: false, reason: "image fetching is not available", userCanResolve: false };
+    let doc: Awaited<ReturnType<FetchDoc>>;
+    try { doc = await this.d.fetchDoc(img.url, { binary: true, maxBytes: IMAGE_MAX_BYTES }); } catch (e) { return { ok: false, reason: `image could not be retrieved (${clip(e instanceof Error ? e.message : e, 80)})`, userCanResolve: false }; }
+    if (!doc.ok || !doc.bytes) return doc.reason === "too_large" ? { ok: false, reason: "the image is larger than the 1 MB analysis limit", userCanResolve: true } : { ok: false, reason: `image could not be retrieved (${doc.reason ?? "unreadable"})`, userCanResolve: false };
+    const mime = sniffImage(doc.bytes);
+    if (!mime) return { ok: false, reason: "unsupported image format (only JPEG, PNG and WebP can be analysed)", userCanResolve: false };
+    const sha256 = createHash("sha256").update(doc.bytes).digest("hex");
+    const dataUrl = `data:${mime};base64,${Buffer.from(doc.bytes).toString("base64")}`;
+    return { ok: true, bytes: doc.bytes, mime, sha256, dataUrl, dataUrlChars: dataUrl.length };
   }
 
   private evidenceCtx(x: Dossier): EvidenceCtx {
@@ -610,7 +715,7 @@ export class DossierEngine {
    * operator, never reported as completed. Provider failures are not recovery attempts: they fail the stage and follow the retry limits.
    */
   private async aiStage(b: BusinessIntelligence, x: Dossier, s: StageDef, st: StageRecord) {
-    if (s.id === "audit") await this.analyzeImages(b, x);
+    if (s.id === "audit") await this.assessImages(b, x);
     const queue = this.d.missionQueue;
     const rec = (st.recovery ??= { attempts: [], final: null });
     if (rec.final === "failed") { rec.final = null; rec.round = rec.attempts.length; } // an operator retry starts a fresh bounded round
@@ -673,4 +778,9 @@ export class DossierEngine {
       x.followUps.push({ key, taskId: task.taskId, title: f.title, assignedAI: f.assignedAI, external: f.external } satisfies FollowUpRef);
     }
   }
+}
+
+export function imageSummary(x: Dossier) {
+  const imgs = x.images ?? []; const n = (d: string) => imgs.filter((i) => i.decision === d).length;
+  return { total: imgs.length, confirmed: n("confirmed"), rejected: n("rejected"), needsConfirmation: n("needs_user_confirmation"), skipped: n("skipped"), unassessed: n("pending"), retrievalFailed: imgs.filter((i) => i.retrieval?.status === "failed").length };
 }

@@ -59,11 +59,41 @@ export interface SourceRef {
   pageText?: string;
 }
 export interface ImageObservation { observation: string; category: string; confidence: string }
+export type ImageDecision = "pending" | "confirmed" | "rejected" | "needs_user_confirmation" | "skipped";
+export interface ImageClue { kind: string; detail: string }
+/** What the vision model reported about ONE image, kept apart from verified text evidence (these are AI observations, never facts). */
+export interface ImageAssessment {
+  at: string;
+  status: "assessed" | "unavailable" | "failed";
+  reason?: string;
+  provider?: string; model?: string;
+  association?: "match" | "mismatch" | "uncertain";
+  confidence?: "high" | "medium" | "low";
+  reasoning?: string;
+  imageType?: string;
+  visibleText?: string[];
+  supportingClues?: ImageClue[];
+  conflictingClues?: ImageClue[];
+  attempts: Array<{ outcome: "ok" | "invalid_output" | "provider_failed" | "unavailable"; error?: string; provider?: string; model?: string }>;
+}
 export interface ImageRef {
   id: string; url: string; pageUrl: string; sourceId: string; role: string;
-  decision: "pending" | "confirmed" | "rejected";
+  decision: ImageDecision;
+  /** Who made the current decision and why. An operator decision is never overwritten by the AI. */
+  decidedBy?: "ai" | "operator";
+  decisionReason?: string;
+  decidedAt?: string;
+  /** Retrieval record: the bytes are not stored, only what identifies them. */
+  retrievedAt?: string; sha256?: string; mimeType?: string; bytes?: number;
+  retrieval?: { status: "ok" | "failed"; reason?: string; at: string; userCanResolve: boolean };
+  duplicateOf?: string;
+  assessment?: ImageAssessment;
+  /** Observations are unverified AI readings of the image. They may inform hypotheses and never become verified facts. */
   analysis?: { status: "analyzed" | "unavailable" | "failed"; at: string; reason?: string; generatedBy?: string; observations: ImageObservation[] };
+  /** Association with the business is NOT permission to reuse the image in published marketing. */
+  rights: { status: "unknown" | "owner_permission" | "licensed" | "not_permitted"; note: string; updatedBy?: string; updatedAt?: string };
 }
+export const DEFAULT_IMAGE_RIGHTS = { status: "unknown" as const, note: "Belongs to the business or a third party. Reuse in published marketing needs the owner's permission or a licence; none is recorded." };
 export interface FollowUpRef { key: string; taskId: string; title: string; assignedAI: string; external: boolean }
 
 export interface Dossier {

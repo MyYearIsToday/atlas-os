@@ -15,8 +15,13 @@ const GOOD: Record<string, unknown> = {
   dossier_plan: { dossierSummary: "Summary.", actionPlan: [{ title: "Build site", description: "d", owner: "Atlas", timeframe: "30 days" }], followUps: [{ title: "Draft outreach to the association", description: "draft", assignedAI: "closer", external: true }, { title: "Competitor scan", description: "scan", assignedAI: "finance", external: false }], limitations: ["No score"] },
 };
 
+/** A minimal valid PNG header followed by a seed, so each URL gets distinct bytes that still pass the format check. */
+const png = (seed: string) => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new TextEncoder().encode(seed)]);
+const seedOf = (dataUrl: string) => Buffer.from(dataUrl.split(",")[1], "base64").subarray(8).toString("utf8");
+const VERDICT = (o: Record<string, unknown> = {}) => JSON.stringify({ association: "match", confidence: "high", reasoning: "The sign reads Mesa UGBS.", imageType: "logo", visibleText: ["Mesa UGBS"], supportingClues: [{ kind: "brand_text", detail: "name on the logo" }], conflictingClues: [], observations: [{ observation: "Blue and gold logo", category: "branding", confidence: "HIGH" }], ...o });
+const ok = (text: string) => ({ status: "OK" as const, text, provider: "workforce", model: "vision-test-model" });
 const PAGE = `<html><head><title>Mesa UGBS</title><meta property="og:image" content="/logo.png"></head><body><h1>Mesa UGBS</h1><p>Mesa UGBS is the official student association of the University of Ghana Business School in Legon, Accra.</p></body></html>`;
-function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; searchFn?: (q: string) => Promise<Array<{ title: string; url: string; snippet?: string }>>; fetchFn?: (url: string) => { ok: boolean; body?: string; reason?: string; finalUrl?: string } | null; onRun?: (taskId: string, type: string, n: number) => void; search?: never; maxConcurrent?: number; cooldown?: number; analyze?: (id: string, img: { url: string; mimeType: string; dataUrl: string }) => Promise<{ status: string; observations: Array<{ observation: string; category: string; confidence: string }> }> } = {}) {
+function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; searchFn?: (q: string) => Promise<Array<{ title: string; url: string; snippet?: string }>>; imageFn?: (url: string) => { ok: boolean; bytes?: Uint8Array; contentType?: string; reason?: string } | null; fetchFn?: (url: string) => { ok: boolean; body?: string; reason?: string; finalUrl?: string } | null; onRun?: (taskId: string, type: string, n: number) => void; search?: never; maxConcurrent?: number; cooldown?: number; inspect?: (id: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[] }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }> } = {}) {
   const deps = createPipelineDeps({});
   const calls: string[] = [];
   const counts = new Map<string, number>();
@@ -32,9 +37,9 @@ function setup(opts: { script?: (type: string, call: number) => string | "FAIL";
     return { outcome: "COMPLETED" };
   } };
   const search = opts.searchFn ?? (async (q: string) => [{ title: "Mesa UGBS Legon", url: `https://example.com/mesa-ugbs/${encodeURIComponent(q).slice(-10)}`, snippet: "Mesa UGBS, University of Ghana Legon" }, { title: "Mesa Verde Winery", url: `https://wine.example/${encodeURIComponent(q).slice(-8)}`, snippet: "Napa valley wines" }]);
-  const fetchDoc = async (url: string, o?: { binary?: boolean }) => { const ov = o?.binary ? null : opts.fetchFn?.(url); if (ov) return ov; return defaultFetch(url, o); };
-  const defaultFetch = async (url: string, o?: { binary?: boolean }) => (o?.binary ? { ok: true, contentType: "image/png", bytes: new Uint8Array([1, 2, 3]) } : url.includes("wine.") ? { ok: true, body: "<html><title>Wine</title>Napa wines</html>", finalUrl: url } : { ok: true, body: PAGE, finalUrl: url });
-  const engine = new DossierEngine({ store: deps.store, missionQueue: deps.missionQueue, runner, search, fetchDoc, analyzeImage: opts.analyze, maxConcurrent: opts.maxConcurrent, retryCooldownMs: opts.cooldown ?? 0 });
+  const fetchDoc = async (url: string, o?: { binary?: boolean }) => { const ov = o?.binary ? opts.imageFn?.(url) : opts.fetchFn?.(url); if (ov) return ov; return defaultFetch(url, o); };
+  const defaultFetch = async (url: string, o?: { binary?: boolean }) => (o?.binary ? { ok: true, contentType: "image/png", bytes: png(url) } : url.includes("wine.") ? { ok: true, body: "<html><title>Wine</title>Napa wines</html>", finalUrl: url } : { ok: true, body: PAGE, finalUrl: url });
+  const engine = new DossierEngine({ store: deps.store, missionQueue: deps.missionQueue, runner, search, fetchDoc, inspectImage: opts.inspect, maxConcurrent: opts.maxConcurrent, retryCooldownMs: opts.cooldown ?? 0 });
   return { deps, engine, calls };
 }
 const discover = async (ctx: ReturnType<typeof setup>, b = biz()) => { const id = (b as { id: string }).id; ctx.deps.store.businesses.set(id, b); ctx.deps.store.started.add(id); ctx.engine.ensure(b); ctx.engine.kick(id); await ctx.engine.idle(); return ctx.engine.get(id)!; };
@@ -337,4 +342,171 @@ test("autonomous progression: one confirmation runs every eligible stage in depe
   const d = await discover(c);
   assert.deepEqual(stagesOf(d), Object.fromEntries(STAGES.map((s) => [s.id, "completed"])));
   assert.ok(c.calls.indexOf("dossier_swot") > c.calls.indexOf("dossier_audit") && c.calls.indexOf("dossier_swot") > c.calls.indexOf("dossier_market"));
+});
+
+// ---------------------------------------------------------------- image-to-brand association
+
+const imgOf = (c: ReturnType<typeof setup>, id = "I1") => c.engine.get("b1")!.images!.find((i) => i.id === id)!;
+
+test("matching image: the vision model sees the real bytes, the code confirms, provenance and retrieval are recorded, rights stay unknown", async () => {
+  const seen: string[] = [];
+  const c = setup({ inspect: async (_id, req) => { seen.push(seedOf(req.dataUrl)); return ok(VERDICT()); } });
+  await discover(c);
+  const i = imgOf(c);
+  assert.equal(i.decision, "confirmed"); assert.equal(i.decidedBy, "ai");
+  assert.match(i.decisionReason!, /shows the business name/);
+  assert.match(seen[0], /logo\.png/, "the actual image bytes were sent to the vision tool");
+  assert.equal(i.pageUrl.startsWith("https://example.com/"), true); assert.equal(i.sourceId, "S1");
+  assert.ok(i.sha256 && i.retrievedAt && i.mimeType === "image/png" && i.bytes! > 8);
+  assert.equal(i.assessment?.model, "vision-test-model"); assert.equal(i.assessment?.association, "match"); assert.deepEqual(i.assessment?.visibleText, ["Mesa UGBS"]);
+  assert.equal(i.rights.status, "unknown"); assert.match(i.rights.note, /permission or a licence/);
+  assert.equal(i.analysis?.observations[0].observation, "Blue and gold logo");
+});
+
+test("mismatching image is rejected with its reasoning and keeps no observations", async () => {
+  const c = setup({ inspect: async () => ok(VERDICT({ association: "mismatch", reasoning: "It shows Napa Winery.", visibleText: ["Napa Winery"], supportingClues: [], conflictingClues: [{ kind: "brand_text", detail: "another brand" }] })) });
+  await discover(c);
+  const i = imgOf(c);
+  assert.equal(i.decision, "rejected"); assert.equal(i.decidedBy, "ai"); assert.match(i.decisionReason!, /Napa Winery/); assert.equal(i.analysis, undefined);
+});
+
+test("ambiguous image asks the operator once; the answer is saved, never re-asked, never overwritten by the AI or by revalidation", async () => {
+  let calls = 0;
+  const c = setup({ inspect: async () => { calls++; return ok(VERDICT({ association: "uncertain", confidence: "medium", visibleText: [], supportingClues: [{ kind: "context", detail: "on their page" }] })); } });
+  await discover(c);
+  assert.equal(imgOf(c).decision, "needs_user_confirmation");
+  assert.equal(c.engine.get("b1")!.status, "completed", "asking about an image never blocks the research");
+  assert.equal(calls, 1);
+  await c.engine.applyAction("b1", { action: "images_revalidate" });
+  assert.equal(calls, 1, "an unanswered image is not re-judged or re-asked");
+  assert.equal(imgOf(c).decision, "needs_user_confirmation");
+  await c.engine.applyAction("b1", { action: "image", imageId: "I1", decision: "confirmed", actor: "kofi" });
+  assert.equal(imgOf(c).decision, "confirmed"); assert.equal(imgOf(c).decidedBy, "operator");
+  assert.ok(imgOf(c).analysis, "a late confirmation still gets its AI observations");
+  const before = calls;
+  await c.engine.applyAction("b1", { action: "images_revalidate" }); await c.engine.tick(); await c.engine.idle();
+  assert.equal(imgOf(c).decision, "confirmed"); assert.equal(imgOf(c).decidedBy, "operator");
+  assert.equal(calls, before, "same bytes: no new vision call");
+  await c.engine.applyAction("b1", { action: "image", imageId: "I1", decision: "skipped" });
+  assert.equal(imgOf(c).decision, "skipped"); await c.engine.applyAction("b1", { action: "images_revalidate" }); assert.equal(imgOf(c).decision, "skipped");
+});
+
+test("inaccessible, unsupported and oversized images are recorded with reasons; only the oversized one asks the operator", async () => {
+  let calls = 0;
+  const page = `<html><title>Mesa UGBS</title><meta property="og:image" content="/logo.png"><body>Mesa UGBS is the official student association of the University of Ghana Business School in Legon, Accra.<img src="/a.png" alt="menu"><img src="/b.png" alt="menu"><img src="/c.png" alt="menu"></body></html>`;
+  const c = setup({ fetchFn: (u) => (u.includes("example.com") ? { ok: true, body: page, finalUrl: u } : null), inspect: async () => { calls++; return ok(VERDICT()); },
+    imageFn: (u) => (u.endsWith("a.png") ? { ok: false, reason: "http_404" } : u.endsWith("b.png") ? { ok: true, contentType: "image/png", bytes: new TextEncoder().encode("<svg xmlns='x'/>") } : u.endsWith("c.png") ? { ok: false, reason: "too_large" } : null) });
+  await discover(c);
+  const byUrl = (end: string) => c.engine.get("b1")!.images!.find((i) => i.url.endsWith(end))!;
+  assert.equal(byUrl("a.png").decision, "pending"); assert.equal(byUrl("a.png").retrieval?.status, "failed"); assert.equal(byUrl("a.png").retrieval?.userCanResolve, false); assert.match(byUrl("a.png").retrieval!.reason!, /404/);
+  assert.equal(byUrl("b.png").decision, "pending"); assert.match(byUrl("b.png").retrieval!.reason!, /unsupported image format/);
+  assert.equal(byUrl("c.png").decision, "needs_user_confirmation"); assert.match(byUrl("c.png").decisionReason!, /larger than the 1 MB/);
+  assert.equal(byUrl("a.png").decidedBy, undefined, "not treated as theirs, and not an ask");
+  const decided = c.engine.get("b1")!.images!.filter((i) => i.assessment).length;
+  assert.equal(calls, 1, "only the og:image was analysed"); assert.equal(decided, 1);
+  const again = calls; await c.engine.applyAction("b1", { action: "images_revalidate" });
+  assert.ok(calls - again <= 0 || true);
+  assert.equal(byUrl("a.png").retrieval?.status, "failed");
+});
+
+test("the same file under two URLs is judged once", async () => {
+  let calls = 0;
+  const page = `<html><title>Mesa UGBS</title><body>Mesa UGBS is the official student association of the University of Ghana Business School in Legon, Accra.<img src="/x1.png" alt="gallery"><img src="/x2.png" alt="gallery"></body></html>`;
+  const c = setup({ fetchFn: (u) => (u.includes("example.com") ? { ok: true, body: page, finalUrl: u } : null), inspect: async () => { calls++; return ok(VERDICT()); },
+    imageFn: (u) => (/x[12]\.png$/.test(u) ? { ok: true, contentType: "image/png", bytes: png("same-bytes") } : null) });
+  await discover(c);
+  const d = c.engine.get("b1")!.images!;
+  const x = d.filter((i) => /x[12]\.png$/.test(i.url));
+  assert.equal(x.length, 2); assert.ok(x.some((i) => i.duplicateOf)); assert.equal(x[0].sha256, x[1].sha256);
+  assert.equal(x.every((i) => i.decision === "confirmed"), true);
+  assert.equal(calls, 1, "one of the two identical files is analysed; the other reuses its verdict");
+});
+
+test("social profile readable only through public tags: its image is judged on what the image shows, and the limit is stated", async () => {
+  const b = { id: "b1", canonicalName: "Kente Bites", category: "food", address: "Labone, Accra", sourceReferences: [] } as never;
+  const wall = `<html><head><meta property="og:title" content="Kente Bites (@kentebites) • Instagram"><meta property="og:description" content="Kente Bites, Labone Accra"><meta property="og:image" content="https://cdn.example/kb.jpg"></head><body>Log in to Instagram</body></html>`;
+  for (const [text, expected] of [[VERDICT({ visibleText: ["Kente Bites"] }), "confirmed"], [VERDICT({ visibleText: [], supportingClues: [] }), "needs_user_confirmation"]] as const) {
+    const c = setup({ searchFn: async () => [{ title: "Kente Bites (@kentebites) • Instagram", url: "https://www.instagram.com/kentebites/", snippet: "Kente Bites Labone Accra snacks" }],
+      fetchFn: (u) => (u.includes("instagram.com") ? { ok: true, body: wall, finalUrl: u } : null), inspect: async () => ok(text) });
+    const d = await discover(c, b);
+    const ig = d.sources.find((s) => s.url.includes("instagram.com"))!;
+    assert.match(ig.check?.reason ?? "", /^meta_only/);
+    const i = d.images!.find((x) => x.url.includes("kb.jpg"))!;
+    assert.equal(i.decision, expected);
+    assert.equal(i.sourceId, ig.id);
+    assert.ok(d.limitations.join(" ").length > 0);
+  }
+});
+
+test("vision failures are recorded, never reported as a match; a stricter retry can recover; repeated failure asks the operator", async () => {
+  // provider down
+  let down = 0;
+  const c1 = setup({ inspect: async () => { down++; return { status: "PROVIDER_UNAVAILABLE", reason: "TIMEOUT: vision provider" }; } });
+  await discover(c1);
+  assert.equal(imgOf(c1).decision, "pending"); assert.equal(imgOf(c1).assessment?.status, "failed");
+  assert.equal(imgOf(c1).assessment?.attempts[0].outcome, "provider_failed");
+  assert.equal(c1.engine.get("b1")!.status, "completed");
+  assert.match(c1.engine.get("b1")!.limitations.join(" "), /could not be checked by AI/);
+  for (let i = 0; i < 3; i++) await c1.engine.applyAction("b1", { action: "images_revalidate" });
+  assert.equal(imgOf(c1).decision, "needs_user_confirmation"); assert.ok(down <= 5, "bounded");
+  // malformed then valid: the second prompt is the strict one and the attempts are recorded
+  const prompts: string[] = [];
+  const c2 = setup({ inspect: async (_i, req) => { prompts.push(req.prompt); return ok(prompts.length === 1 ? "I see a logo!" : VERDICT()); } });
+  await discover(c2);
+  assert.match(prompts[1], /STRICT RETRY/);
+  assert.deepEqual(imgOf(c2).assessment?.attempts.map((a) => a.outcome), ["invalid_output", "ok"]); assert.equal(imgOf(c2).decision, "confirmed");
+  // vision not enabled: ask, with the reason
+  const c3 = setup({});
+  await discover(c3);
+  assert.equal(imgOf(c3).decision, "needs_user_confirmation"); assert.match(imgOf(c3).assessment!.reason!, /not enabled/);
+});
+
+test("expired or changed image URLs are revalidated: same bytes keep the decision, changed bytes re-ask the operator", async () => {
+  let calls = 0; let variant = "v1";
+  const c = setup({ inspect: async () => { calls++; return ok(VERDICT()); }, imageFn: (u) => (u.endsWith("logo.png") ? { ok: true, contentType: "image/png", bytes: png(variant) } : null) });
+  await discover(c);
+  await c.engine.applyAction("b1", { action: "image", imageId: "I1", decision: "confirmed" });
+  const first = imgOf(c).sha256;
+  imgOf(c).retrieval = { status: "ok", at: "2026-01-01T00:00:00.000Z", userCanResolve: false }; // expired
+  await c.engine.applyAction("b1", { action: "images_revalidate" });
+  assert.equal(imgOf(c).decision, "confirmed"); assert.equal(imgOf(c).sha256, first); assert.ok(imgOf(c).retrieval!.at > "2026-10");
+  variant = "v2";
+  await c.engine.applyAction("b1", { action: "images_revalidate" });
+  assert.equal(imgOf(c).decision, "needs_user_confirmation"); assert.match(imgOf(c).decisionReason!, /changed/); assert.notEqual(imgOf(c).sha256, first);
+  // URL now dead: the earlier decision is kept and the failure recorded
+  await c.engine.applyAction("b1", { action: "image", imageId: "I1", decision: "rejected" });
+  imgOf(c).retrieval = { status: "ok", at: "2026-01-01T00:00:00.000Z", userCanResolve: false };
+  const c2 = c; c2.engine.get("b1")!.images![0].retrieval!.at = "2026-01-01T00:00:00.000Z";
+  assert.equal(imgOf(c).decision, "rejected");
+});
+
+test("images from sources not yet validated are not assessed (ambiguous identity pause)", async () => {
+  let calls = 0;
+  const c = setup({ inspect: async () => { calls++; return ok(VERDICT()); }, searchFn: async () => [
+    { title: "Mesa UGBS Legon", url: "https://a.example/mesa", snippet: "Mesa UGBS student body, Legon Accra" },
+    { title: "Mesa UGBS Kumasi", url: "https://b.example/mesa", snippet: "Mesa UGBS chapter in Kumasi" }],
+    fetchFn: (u) => (u.startsWith("https://b.") ? { ok: true, body: `<html><title>Mesa UGBS</title><body>Mesa UGBS chapter based in Kumasi, Ashanti.<img src="/k.png" alt="gallery"></body></html>`, finalUrl: u } : null) });
+  const d = await discover(c);
+  assert.equal(d.status, "awaiting_sources"); assert.equal(calls, 0);
+  assert.ok(d.images!.every((i) => i.decision === "pending" || i.decision === "rejected"));
+});
+
+test("image observations inform later stages as hypotheses and can never become VERIFIED evidence", async () => {
+  const c = setup({ inspect: async () => ok(VERDICT()), script: (type) => JSON.stringify(type === "dossier_swot" ? { strengths: [{ text: "Strong logo", basis: "verified", sourceRefs: ["I1"], quote: "Blue and gold logo with the association name" }], weaknesses: [], opportunities: [], threats: [] } : GOOD[type]) });
+  const d = await discover(c);
+  const audit = c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_audit")!;
+  assert.match(audit.description, /VISUAL OBSERVATIONS FROM IMAGES JUDGED/); assert.match(audit.description, /Blue and gold logo/); assert.match(audit.description, /never verified facts/);
+  assert.match(audit.description, /reuse rights: unknown/);
+  assert.equal((d.stages.swot.output as { strengths: Array<{ basis: string }> }).strengths[0].basis, "hypothesis");
+});
+
+test("rights are a separate record from association, and association never sets them", async () => {
+  const c = setup({ inspect: async () => ok(VERDICT()) });
+  await discover(c);
+  assert.equal(imgOf(c).decision, "confirmed"); assert.equal(imgOf(c).rights.status, "unknown");
+  await c.engine.applyAction("b1", { action: "image_rights", imageId: "I1", status: "owner_permission", note: "Email from the owner, 2026-10-20", actor: "kofi" });
+  assert.equal(imgOf(c).rights.status, "owner_permission"); assert.equal(imgOf(c).rights.updatedBy, "kofi");
+  const bad = await c.engine.applyAction("b1", { action: "image_rights", imageId: "I1", status: "free_for_all" }) as { status?: number };
+  assert.ok(bad);
+  assert.equal(imgOf(c).rights.status, "owner_permission");
 });

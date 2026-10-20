@@ -154,7 +154,7 @@ export function htmlMeta(html: string): string {
 export const htmlTitle = (html: string) => (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
 
 export interface ImageCandidate { url: string; role: "og_image" | "icon" | "logo" | "page_image" }
-export function extractImages(html: string, baseUrl: string, max = 4): ImageCandidate[] {
+export function extractImages(html: string, baseUrl: string, max = 6): ImageCandidate[] {
   const out: ImageCandidate[] = []; const seen = new Set<string>();
   const add = (raw: string | undefined, role: ImageCandidate["role"]) => {
     if (!raw || out.length >= max) return;
@@ -167,7 +167,16 @@ export function extractImages(html: string, baseUrl: string, max = 4): ImageCand
   };
   for (const m of html.matchAll(/<meta[^>]+(?:property|name)=["'](?:og:image(?::secure_url)?|twitter:image)["'][^>]*>/gi)) add(/content=["']([^"']+)["']/i.exec(m[0])?.[1], "og_image");
   for (const m of html.matchAll(/<link[^>]+rel=["'][^"']*(?:apple-touch-icon|icon)[^"']*["'][^>]*>/gi)) add(/href=["']([^"']+)["']/i.exec(m[0])?.[1], "icon");
-  for (const m of html.matchAll(/<img\b[^>]*>/gi)) { if (/logo|brand/i.test(m[0])) add(/src=["']([^"']+)["']/i.exec(m[0])?.[1], "logo"); }
+  const attr = (tag: string, name: string) => new RegExp(`\\b${name}=["']([^"']+)["']`, "i").exec(tag)?.[1];
+  const best = (tag: string) => { const ss = attr(tag, "srcset") ?? attr(tag, "data-srcset"); const pick = ss ? ss.split(",").map((p) => p.trim().split(/\s+/)).map(([u, w]) => ({ u, w: parseInt(w ?? "0", 10) || 0 })).sort((a, b) => b.w - a.w)[0]?.u : undefined; return pick ?? attr(tag, "data-src") ?? attr(tag, "data-lazy-src") ?? attr(tag, "src"); };
+  for (const m of html.matchAll(/<img\b[^>]*>/gi)) { if (/logo|brand/i.test(m[0])) add(best(m[0]), "logo"); }
+  // Other page images that look like storefront / product / menu / promotion material. Tiny images, sprites and tracking pixels are skipped.
+  for (const m of html.matchAll(/<img\b[^>]*>/gi)) {
+    const tag = m[0]; if (/logo|brand/i.test(tag)) continue;
+    const w = Number(attr(tag, "width")), h = Number(attr(tag, "height"));
+    if ((w && w < 120) || (h && h < 120) || /sprite|pixel|tracking|spacer|avatar|emoji|icon|arrow|loader|blank/i.test(tag)) continue;
+    if (/menu|product|shop|store|storefront|gallery|promo|banner|offer|hero|dish|food|service|about|team|outlet|branch/i.test(tag)) add(best(tag), "page_image");
+  }
   return out;
 }
 

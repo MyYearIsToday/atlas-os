@@ -8,7 +8,7 @@ import type { BusinessRepository } from "../../src/services/scout/business-repos
 import type { AutonomyRuntime } from "../../src/services/autonomy/observability";
 import type { AutonomyCycle } from "../../src/services/autonomy/loop";
 import type { Dossier } from "../../src/orchestrator/dossier-types";
-import { STAGES, type DossierEngine } from "./dossier";
+import { STAGES, imageSummary, type DossierEngine } from "./dossier";
 
 /**
  * Scout visibility + operator authorisation ("Start working") + bounded "process now".
@@ -62,6 +62,7 @@ export function summarizeDossier(d: Dossier | undefined, missions: Array<{ taskI
   if (!d) return null;
   return {
     status: d.status, updatedAt: d.updatedAt, manualRetries: d.manualRetries, sources: d.sources.length, sourceApproval: d.sourceApproval ?? null, sourcesApproved: d.sources.filter((s) => s.decision === "approved").length, sourcesPending: d.sources.filter((s) => (s.decision ?? "pending") === "pending").length, limitations: d.limitations,
+    images: imageSummary(d),
     stages: STAGES.map((s) => { const st = d.stages[s.id]; return { id: s.id, title: s.title, status: st.status, taskId: st.taskId, missionStatus: missions.find((m) => m.taskId === st.taskId)?.status ?? null, attempts: st.attempts, error: st.error, completedAt: st.completedAt, generatedBy: st.generatedBy, dependsOn: s.dependsOn, softDependsOn: s.softDependsOn ?? [], recovery: st.recovery ? { final: st.recovery.final, attempts: st.recovery.attempts } : null }; }),
     followUps: d.followUps.map((f) => ({ ...f, missionStatus: missions.find((m) => m.taskId === f.taskId)?.status ?? null })),
   };

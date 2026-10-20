@@ -633,10 +633,7 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       const searchProvider = new TavilyWebDiscoveryProvider();
       dossierEngine = new DossierEngine({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 6 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })),
         fetchDoc: safeFetch,
-        analyzeImage: pipelineDeps.multimodalIntelligence ? async (businessId, img) => {
-          const r = await pipelineDeps!.multimodalIntelligence!.analyze({ businessId, sourceType: "image", sourceReference: img.url, mimeType: img.mimeType, dataUrl: img.dataUrl });
-          return { status: r.status, observations: r.observations.map((o) => ({ observation: o.observation, category: o.category, confidence: o.confidence })), generatedBy: "workforce:vision_employee" };
-        } : undefined });
+        inspectImage: pipelineDeps.multimodalIntelligence?.inspect ? (businessId, req) => pipelineDeps!.multimodalIntelligence!.inspect!({ businessId, prompt: req.prompt, mimeType: req.mimeType, dataUrl: req.dataUrl, ...(req.excludeModels ? { excludeModels: req.excludeModels } : {}) }) : undefined });
       const engine = dossierEngine;
       const autonomyScheduler = new AutonomyScheduler(async (trigger) => { const c = await runAutonomyCycle(cycleDeps, trigger); if (trigger === "scheduled") await engine.tick(3).catch((e) => console.error(`[atlas-dossier] tick error: ${e instanceof Error ? e.message : "unknown"}`)); await persistence?.flush(); return c; }, (e) => console.error(`[atlas-autonomy] cycle error: ${e instanceof Error ? e.message : "unknown"}`));
       const autonomyEnabled = process.env.ATLAS_AUTONOMY_ENABLED === "true";
