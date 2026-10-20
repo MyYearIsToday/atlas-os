@@ -31,7 +31,7 @@ export interface DossierDeps {
   fetchDoc?: FetchDoc;
   /** Optional vision analysis of an operator-confirmed image (existing multimodal service). */
   /** Vision call (the Workforce vision employee). Returns raw text for Atlas to validate; absent when image analysis is not enabled. */
-  inspectImage?: (businessId: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[] }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }>;
+  inspectImage?: (businessId: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[]; references?: Array<{ id: string; mimeType: string; dataUrl: string }> }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }>;
   flush?: () => Promise<void>;
   now?: () => string;
   /** Concurrent businesses worked on in this process (free-tier memory). */
@@ -558,7 +558,7 @@ export class DossierEngine {
         Object.assign(img, { decision: body.decision as ImageRef["decision"], decidedBy: "operator", decisionReason: `decided by ${actor}`, decidedAt: this.now() });
         if (img.decision === "rejected") delete img.analysis;
         // Confirmed images still get their AI observations (a late confirmation informs later stages); the decision itself is the operator's and is never changed by the AI.
-        else if (img.decision === "confirmed" && !img.analysis) await this.assessImages(b, x, { only: img.id });
+        else if (img.decision === "confirmed") await this.assessImages(b, x); // gets its observations, and images that lacked a reference are reconsidered against it
       }
     } else if (action === "image_rights") {
       const img = (x.images ?? []).find((i) => i.id === body.imageId);
@@ -604,7 +604,21 @@ export class DossierEngine {
     const identity: BusinessIdentity = { name: b.canonicalName, category: b.category, address: b.address, website: b.website, handles };
     let vision = IMAGE_VISION_PER_RUN;
     const ageOf = (iso?: string) => (iso ? Date.now() - Date.parse(iso) : Infinity);
-    for (const img of images) {
+    const rank = (i: ImageRef) => ({ logo: 0, og_image: 1, icon: 2 } as Record<string, number>)[i.role] ?? 3;
+    // Reference images: brand assets already confirmed by the OPERATOR, or by the business name read in the image. A visual-only
+    // confirmation never becomes a reference, so a lookalike cannot vouch for the next lookalike.
+    const refCache = new Map<string, { id: string; mimeType: string; dataUrl: string } | null>();
+    const refsNow = async (exclude: string) => {
+      const eligible = (x.images ?? []).filter((r) => r.id !== exclude && r.decision === "confirmed" && (r.decidedBy === "operator" || r.assessment?.basis === "name_text")).sort((p1, p2) => rank(p1) - rank(p2)).slice(0, 4);
+      const out: Array<{ id: string; mimeType: string; dataUrl: string }> = [];
+      for (const r of eligible) {
+        if (out.length >= 2) break;
+        if (!refCache.has(r.id)) { const g = await this.retrieveImage(r); refCache.set(r.id, g.ok && g.dataUrlChars <= 400_000 ? { id: r.id, mimeType: g.mime, dataUrl: g.dataUrl } : null); }
+        const c = refCache.get(r.id); if (c) out.push(c);
+      }
+      return out;
+    };
+    for (const img of [...images].sort((p1, p2) => rank(p1) - rank(p2))) {
       const src = x.sources.find((u) => u.id === img.sourceId);
       const operator = img.decidedBy === "operator";
       const forced = Boolean(opts.only) || Boolean(opts.recheckAll);
@@ -615,7 +629,9 @@ export class DossierEngine {
       const stale = ageOf(checkedAt) > IMAGE_RECHECK_MS;
       const decided = img.decision !== "pending";
       const needsObservations = operator && img.decision === "confirmed" && !img.analysis && !img.assessment;
-      if (decided && !stale && !(forced && opts.recheckAll) && !needsObservations) continue;
+      // An image Atlas could not decide for lack of a reference is looked at again once a NEW reference image has been confirmed.
+      const reconsider = !operator && img.decision === "needs_user_confirmation" && img.assessment?.status === "assessed" && !img.duplicateOf && (await refsNow(img.id)).some((r) => !(img.assessment?.referenceIds ?? []).includes(r.id));
+      if (decided && !stale && !(forced && opts.recheckAll) && !needsObservations && !reconsider) continue;
       if (img.decision === "pending" && img.retrieval?.status === "failed" && !stale && !forced) continue; // do not hammer an unreachable URL
       if (img.duplicateOf && !stale && !forced) continue;
 
@@ -630,7 +646,7 @@ export class DossierEngine {
       const changed = Boolean(img.sha256) && img.sha256 !== got.sha256;
       img.retrieval = { status: "ok", at: this.now(), userCanResolve: false };
       img.retrievedAt = this.now(); img.mimeType = got.mime; img.bytes = got.bytes.length;
-      if (!changed && decided && !needsObservations) { img.sha256 = got.sha256; continue; } // revalidated: same bytes, decision stands
+      if (!changed && decided && !needsObservations && !reconsider) { img.sha256 = got.sha256; continue; } // revalidated: same bytes, decision stands
       img.sha256 = got.sha256;
       if (changed && decided) {
         const was = operator ? "after you decided" : "since it was last assessed";
@@ -639,19 +655,20 @@ export class DossierEngine {
         Object.assign(img, { decision: "pending", decidedBy: undefined, decisionReason: undefined });
       }
       // ---- duplicates: the same bytes are judged once
-      const twin = images.find((o) => o !== img && o.sha256 === got.sha256 && o.id < img.id && !o.duplicateOf);
-      if (twin && twin.decision !== "pending") { Object.assign(img, { duplicateOf: twin.id, decision: twin.decision, decidedBy: "ai", decisionReason: `same file as ${twin.id} (${twin.decisionReason ?? twin.decision})`, decidedAt: this.now() }); continue; }
+      const twin = reconsider ? undefined : images.find((o) => o !== img && o.sha256 === got.sha256 && o.decision !== "pending" && !o.duplicateOf);
+      if (twin) { Object.assign(img, { duplicateOf: twin.id, decision: twin.decision, decidedBy: "ai", decisionReason: `same file as ${twin.id} (${twin.decisionReason ?? twin.decision})`, decidedAt: this.now() }); continue; }
       // ---- vision
       if (!this.d.inspectImage) { Object.assign(img, { decision: needsObservations ? img.decision : "needs_user_confirmation", decisionReason: needsObservations ? img.decisionReason : "image analysis is not enabled on this server, so Atlas cannot check the image itself; you can judge it by looking", assessment: { at: this.now(), status: "unavailable", reason: "image analysis is not enabled on this server (needs ATLAS_MULTIMODAL_ENABLED=true and the AI Workforce)", attempts: [{ outcome: "unavailable" }] } as ImageAssessment }); continue; }
       if (vision-- <= 0) continue; // bounded per run; the rest are assessed on the next pass
       if (got.dataUrlChars > 1_400_000) { Object.assign(img, { decision: needsObservations ? img.decision : "needs_user_confirmation", decisionReason: needsObservations ? img.decisionReason : "the image is too large for AI analysis; you can judge it by opening it", assessment: { at: this.now(), status: "unavailable", reason: "image too large for analysis", attempts: [{ outcome: "unavailable" }] } as ImageAssessment }); continue; }
       const ctx = { sourceKind: src?.kind, official: Boolean(src?.official), metaOnly: Boolean(src?.check?.reason?.startsWith("meta_only")), pageUrl: img.pageUrl, pageTitle: src?.title, pageExcerpt: src?.pageText?.slice(0, 300), role: img.role };
       const prior = img.assessment?.attempts ?? [];
+      const refs = await refsNow(img.id);
       const attempts: ImageAssessment["attempts"] = [...prior];
       let parsed: ReturnType<typeof parseAssociation> | undefined; let model: { provider?: string; model?: string } = {}; let lastError: string | undefined;
       for (let n = 0; n < 2 && !parsed?.ok; n++) {
         let r: Awaited<ReturnType<NonNullable<DossierDeps["inspectImage"]>>>;
-        try { r = await this.d.inspectImage(b.id, { prompt: buildAssociationPrompt(identity, ctx, n > 0, lastError), mimeType: got.mime, dataUrl: got.dataUrl, ...(n > 0 && model.model ? { excludeModels: [model.model] } : {}) }); }
+        try { r = await this.d.inspectImage(b.id, { prompt: buildAssociationPrompt(identity, ctx, n > 0, lastError, refs.map((r) => r.id)), mimeType: got.mime, dataUrl: got.dataUrl, ...(refs.length ? { references: refs } : {}), ...(n > 0 && model.model ? { excludeModels: [model.model] } : {}) }); }
         catch (e) { r = { status: "PROVIDER_UNAVAILABLE", reason: clip(e instanceof Error ? e.message : e, 100) }; }
         if (r.status !== "OK") { attempts.push({ outcome: "provider_failed", error: clip((r as { reason: string }).reason, 160) }); break; }
         const ok = r as { text: string; provider: string; model: string }; model = { provider: ok.provider, model: ok.model };
@@ -668,10 +685,11 @@ export class DossierEngine {
         continue;
       }
       const a = parsed.value;
-      img.assessment = { at: this.now(), status: "assessed", ...model, association: a.association, confidence: a.confidence, reasoning: a.reasoning, imageType: a.imageType, visibleText: a.visibleText, supportingClues: a.supportingClues, conflictingClues: a.conflictingClues, attempts: attempts.slice(-8) };
+      img.assessment = { at: this.now(), status: "assessed", ...model, association: a.association, confidence: a.confidence, relationship: a.relationship, reasoning: a.reasoning, imageType: a.imageType, visibleText: a.visibleText, supportingClues: a.supportingClues, conflictingClues: a.conflictingClues, referenceIds: refs.map((r) => r.id), referenceComparison: a.referenceComparison, attempts: attempts.slice(-8) };
       img.role = img.role === "page_image" && a.imageType && a.imageType !== "other" ? a.imageType : img.role;
       if (needsObservations) { img.analysis = { status: "analyzed", at: this.now(), generatedBy: model.model ? `${model.provider}/${model.model}` : "workforce:vision_employee", observations: a.observations }; continue; }
-      const v = decideImage(identity, a, ctx);
+      const v = decideImage(identity, a, ctx, refs.length > 0);
+      if (v.basis) img.assessment.basis = v.basis;
       Object.assign(img, { decision: v.decision, decidedBy: "ai", decisionReason: v.reason, decidedAt: this.now() });
       if (v.decision === "rejected") delete img.analysis;
       else img.analysis = { status: "analyzed", at: this.now(), generatedBy: model.model ? `${model.provider}/${model.model}` : "workforce:vision_employee", observations: a.observations };

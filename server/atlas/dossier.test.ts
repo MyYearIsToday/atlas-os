@@ -18,10 +18,10 @@ const GOOD: Record<string, unknown> = {
 /** A minimal valid PNG header followed by a seed, so each URL gets distinct bytes that still pass the format check. */
 const png = (seed: string) => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new TextEncoder().encode(seed)]);
 const seedOf = (dataUrl: string) => Buffer.from(dataUrl.split(",")[1], "base64").subarray(8).toString("utf8");
-const VERDICT = (o: Record<string, unknown> = {}) => JSON.stringify({ association: "match", confidence: "high", reasoning: "The sign reads Mesa UGBS.", imageType: "logo", visibleText: ["Mesa UGBS"], supportingClues: [{ kind: "brand_text", detail: "name on the logo" }], conflictingClues: [], observations: [{ observation: "Blue and gold logo", category: "branding", confidence: "HIGH" }], ...o });
+const VERDICT = (o: Record<string, unknown> = {}) => JSON.stringify({ association: "match", confidence: "high", relationship: "business_itself", reasoning: "The sign reads Mesa UGBS.", imageType: "logo", visibleText: ["Mesa UGBS"], supportingClues: [{ kind: "brand_text", detail: "name on the logo" }], conflictingClues: [], observations: [{ observation: "Blue and gold logo", category: "branding", confidence: "HIGH" }], ...o });
 const ok = (text: string) => ({ status: "OK" as const, text, provider: "workforce", model: "vision-test-model" });
 const PAGE = `<html><head><title>Mesa UGBS</title><meta property="og:image" content="/logo.png"></head><body><h1>Mesa UGBS</h1><p>Mesa UGBS is the official student association of the University of Ghana Business School in Legon, Accra.</p></body></html>`;
-function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; searchFn?: (q: string) => Promise<Array<{ title: string; url: string; snippet?: string }>>; imageFn?: (url: string) => { ok: boolean; bytes?: Uint8Array; contentType?: string; reason?: string } | null; fetchFn?: (url: string) => { ok: boolean; body?: string; reason?: string; finalUrl?: string } | null; onRun?: (taskId: string, type: string, n: number) => void; search?: never; maxConcurrent?: number; cooldown?: number; inspect?: (id: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[] }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }> } = {}) {
+function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; searchFn?: (q: string) => Promise<Array<{ title: string; url: string; snippet?: string }>>; imageFn?: (url: string) => { ok: boolean; bytes?: Uint8Array; contentType?: string; reason?: string } | null; fetchFn?: (url: string) => { ok: boolean; body?: string; reason?: string; finalUrl?: string } | null; onRun?: (taskId: string, type: string, n: number) => void; search?: never; maxConcurrent?: number; cooldown?: number; inspect?: (id: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[]; references?: Array<{ id: string; mimeType: string; dataUrl: string }> }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }> } = {}) {
   const deps = createPipelineDeps({});
   const calls: string[] = [];
   const counts = new Map<string, number>();
@@ -509,4 +509,62 @@ test("rights are a separate record from association, and association never sets 
   const bad = await c.engine.applyAction("b1", { action: "image_rights", imageId: "I1", status: "free_for_all" }) as { status?: number };
   assert.ok(bad);
   assert.equal(imgOf(c).rights.status, "owner_permission");
+});
+
+// ---------------------------------------------------------------- recognition without visible text (mocked vision; NOT a real-model test)
+
+const GALLERY = `<html><title>Mesa UGBS</title><meta property="og:image" content="/logo.png"><body>Mesa UGBS is the official student association of the University of Ghana Business School in Legon, Accra.${["sym", "look", "reseller", "partner", "stock"].map((n) => `<img src="/${n}.png" alt="gallery">`).join("")}</body></html>`;
+const NOREF = { compared: false, sameBrandMark: "cannot_tell", matchingFeatures: [], differences: [] };
+const SAME = { compared: true, sameBrandMark: "yes", matchingFeatures: [{ kind: "symbol", detail: "gold diamond with a corner bite", distinctiveness: "high" }], differences: [] };
+const noName = (o: Record<string, unknown>) => VERDICT({ visibleText: [], supportingClues: [{ kind: "symbol", detail: "gold diamond" }], ...o });
+
+test("without visible text: a logo confirmed by name becomes the reference; symbol-only images match it, lookalikes/resellers/partners/stock do not", async () => {
+  const refsSeen = new Map<string, string[]>();
+  const c = setup({ fetchFn: (u) => (u.includes("example.com") ? { ok: true, body: GALLERY, finalUrl: u } : null),
+    inspect: async (_i, req) => {
+      const seed = seedOf(req.dataUrl); const name = seed.split("/").pop()!.replace(".png", "");
+      refsSeen.set(name, (req.references ?? []).map((r) => seedOf(r.dataUrl)));
+      const has = (req.references?.length ?? 0) > 0;
+      switch (name) {
+        case "logo": return ok(VERDICT());
+        case "sym": return ok(noName({ referenceComparison: has ? SAME : NOREF }));
+        case "look": return ok(noName({ referenceComparison: { ...SAME, sameBrandMark: "similar_but_different", differences: ["no corner bite"] } }));
+        case "reseller": return ok(VERDICT({ relationship: "reseller_or_stockist", reasoning: "On a supermarket shelf." }));
+        case "partner": return ok(noName({ relationship: "partner_or_sponsor", reasoning: "Sponsor strip." }));
+        default: return ok(VERDICT({ association: "mismatch", relationship: "stock_or_generic", visibleText: [], supportingClues: [], reasoning: "Stock photo." }));
+      }
+    } });
+  await discover(c);
+  const by = (n: string) => c.engine.get("b1")!.images!.find((i) => i.url.endsWith(`/${n}.png`))!;
+  assert.equal(by("logo").decision, "confirmed"); assert.equal(by("logo").assessment?.basis, "name_text");
+  assert.deepEqual(refsSeen.get("logo"), [], "the first logo has nothing to be compared with");
+  assert.equal(by("sym").decision, "confirmed"); assert.equal(by("sym").assessment?.basis, "visual_reference"); assert.deepEqual(by("sym").assessment?.visibleText, []);
+  assert.match(by("sym").decisionReason!, /name is not needed/);
+  assert.equal(refsSeen.get("sym")!.length, 1); assert.match(refsSeen.get("sym")![0], /logo\.png/, "the real reference bytes were sent with the candidate");
+  assert.equal(by("look").decision, "needs_user_confirmation"); assert.match(by("look").decisionReason!, /lookalike/);
+  assert.equal(by("reseller").decision, "rejected"); assert.match(by("reseller").decisionReason!, /reseller/);
+  assert.equal(by("partner").decision, "rejected");
+  assert.equal(by("stock").decision, "rejected");
+  for (const n of ["sym", "look", "reseller", "partner", "stock"]) assert.deepEqual(by(n).assessment?.referenceIds, [by("logo").id], "only the name-confirmed logo is ever a reference, never a visually-confirmed image");
+  assert.equal(c.engine.get("b1")!.status, "completed");
+});
+
+test("a symbol-only image that could not be decided without a reference is reconsidered automatically once you confirm the logo", async () => {
+  let calls = 0;
+  const c = setup({ fetchFn: (u) => (u.includes("example.com") ? { ok: true, body: GALLERY.replace(/<img src="\/(look|reseller|partner|stock)\.png" alt="gallery">/g, ""), finalUrl: u } : null),
+    inspect: async (_i, req) => { calls++; const name = seedOf(req.dataUrl).split("/").pop()!.replace(".png", ""); const has = (req.references?.length ?? 0) > 0;
+      return ok(name === "logo" ? noName({ referenceComparison: NOREF, association: "uncertain", confidence: "medium", relationship: "unclear" }) : noName({ referenceComparison: has ? SAME : NOREF })); } });
+  await discover(c);
+  const by = (n: string) => c.engine.get("b1")!.images!.find((i) => i.url.endsWith(`/${n}.png`))!;
+  assert.equal(by("logo").decision, "needs_user_confirmation");
+  assert.equal(by("sym").decision, "needs_user_confirmation"); assert.match(by("sym").decisionReason!, /no confirmed reference image/);
+  const before = calls;
+  await c.engine.applyAction("b1", { action: "images_revalidate" });
+  assert.equal(calls, before, "nothing new to compare with: no new vision calls and no repeated questions");
+  await c.engine.applyAction("b1", { action: "image", imageId: by("logo").id, decision: "confirmed", actor: "kofi" });
+  assert.equal(by("logo").decidedBy, "operator");
+  assert.equal(by("sym").decision, "confirmed"); assert.equal(by("sym").decidedBy, "ai"); assert.equal(by("sym").assessment?.basis, "visual_reference"); assert.deepEqual(by("sym").assessment?.referenceIds, [by("logo").id]);
+  const after = calls;
+  await c.engine.applyAction("b1", { action: "images_revalidate" });
+  assert.equal(calls, after, "decided images are not judged again");
 });

@@ -68,6 +68,13 @@ export interface ImageAssessment {
   reason?: string;
   provider?: string; model?: string;
   association?: "match" | "mismatch" | "uncertain";
+  /** What the image is in relation to the business: only "business_itself" can be auto-confirmed. */
+  relationship?: "business_itself" | "reseller_or_stockist" | "partner_or_sponsor" | "unrelated_brand" | "stock_or_generic" | "unclear";
+  /** How a confirmation was reached: the business name read from the image, a visual match to a confirmed reference image, or distinctive visual clues from the business's own site. */
+  basis?: "name_text" | "visual_reference" | "visual_clues";
+  /** Reference images (already confirmed brand assets) the candidate was compared with, and the model's comparison. */
+  referenceIds?: string[];
+  referenceComparison?: { compared: boolean; sameBrandMark: "yes" | "no" | "similar_but_different" | "cannot_tell"; matchingFeatures: Array<ImageClue & { distinctiveness: "high" | "medium" | "low" }>; differences: string[] };
   confidence?: "high" | "medium" | "low";
   reasoning?: string;
   imageType?: string;
