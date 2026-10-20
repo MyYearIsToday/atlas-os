@@ -55,6 +55,8 @@ export interface AutonomousWorkforceOptions {
   executeJob?: MissionJobExecutor;
   /** Extra, read-only context for a mission (business record, approved evidence, prior stage outputs). */
   contextProvider?: (task: Task) => string | undefined;
+  /** Optional routing hints for a mission (e.g. models to avoid on a recovery attempt). */
+  hintsProvider?: (task: Task) => { excludeModels?: string[] } | undefined;
 }
 
 export interface MissionExecutionOptions {
@@ -257,6 +259,7 @@ export class AutonomousWorkforce {
       const request: AIJobRequest = {
         workerRole,
         ...(taskType ? { taskType } : {}),
+        ...((() => { const h = this.options.hintsProvider?.(task); return h?.excludeModels?.length ? { excludeModels: h.excludeModels } : {}; })()),
         // Structured dossier stages return long JSON; the providers' default of 1024 tokens truncated it.
         ...(task.missionType && task.missionType.startsWith("dossier_") ? { maxTokens: 6000 } : {}),
         task: `${task.title}\n\n${task.description}${(() => { const c = this.options.contextProvider?.(task); return c ? `\n\n${c}` : ""; })()}`,

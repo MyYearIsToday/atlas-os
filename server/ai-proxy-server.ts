@@ -607,6 +607,8 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
         pipelineDeps.multimodalIntelligence = new MultimodalIntelligenceService(providers.workforce);
       }
       const workforce = new AutonomousWorkforce({ missionQueue: pipelineDeps.missionQueue, providerRegistry, workforceConfig: withFreeWorkforceRouting(defaultWorkforceConfig, Boolean(providers?.workforce) && executionEnabled), ledger, orchestrator,
+        // Recovery attempts after unusable output skip the models that already failed (free-only chains; nothing paid is ever added).
+        hintsProvider: (task) => dossierEngine?.hintsFor(task.taskId),
         // Approved non-stage missions get the business record, approved-source evidence and prior dossier outputs, not just a title.
         contextProvider: (task) => { if (!task.clientId || String(task.missionType ?? "").startsWith("dossier_") && task.missionType !== "dossier_followup") return undefined; const b = pipelineDeps!.store.businesses.get(task.clientId); return b ? missionContext(b, pipelineDeps!.store.dossiers.get(task.clientId), pipelineDeps!.store) : undefined; } });
       const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled,

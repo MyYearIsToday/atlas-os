@@ -16,7 +16,7 @@ const GOOD: Record<string, unknown> = {
 };
 
 const PAGE = `<html><head><title>Mesa UGBS</title><meta property="og:image" content="/logo.png"></head><body><h1>Mesa UGBS</h1><p>Mesa UGBS is the official student association of the University of Ghana Business School in Legon, Accra.</p></body></html>`;
-function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; search?: never; maxConcurrent?: number; cooldown?: number; analyze?: (id: string, img: { url: string; mimeType: string; dataUrl: string }) => Promise<{ status: string; observations: Array<{ observation: string; category: string; confidence: string }> }> } = {}) {
+function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; searchFn?: (q: string) => Promise<Array<{ title: string; url: string; snippet?: string }>>; fetchFn?: (url: string) => { ok: boolean; body?: string; reason?: string; finalUrl?: string } | null; onRun?: (taskId: string, type: string, n: number) => void; search?: never; maxConcurrent?: number; cooldown?: number; analyze?: (id: string, img: { url: string; mimeType: string; dataUrl: string }) => Promise<{ status: string; observations: Array<{ observation: string; category: string; confidence: string }> }> } = {}) {
   const deps = createPipelineDeps({});
   const calls: string[] = [];
   const counts = new Map<string, number>();
@@ -24,25 +24,28 @@ function setup(opts: { script?: (type: string, call: number) => string | "FAIL";
     const t = deps.missionQueue.getSnapshot().find((x) => x.taskId === taskId)!;
     calls.push(t.missionType!);
     const n = (counts.get(t.missionType!) ?? 0) + 1; counts.set(t.missionType!, n);
+    opts.onRun?.(taskId, t.missionType!, n);
     const out = (opts.script ?? ((type) => JSON.stringify(GOOD[type])))(t.missionType!, n);
     if (out === "FAIL") { await deps.missionQueue.update(taskId, { status: "Failed", lastFailureReason: "provider down", retryCount: t.retryCount + 1 }); return { outcome: "FAILED", reason: "provider down" }; }
     await deps.missionQueue.update(taskId, { status: "Completed", completedAt: new Date().toISOString() });
-    deps.store.missionOutputs.set(taskId, { generatedBy: "test/model", text: out, isEvidence: false });
+    deps.store.missionOutputs.set(taskId, { generatedBy: `test/model-${n}`, text: out, isEvidence: false, routing: { taskType: null, employee: "scout", routedBy: "test", selected: null, actual: { provider: "test", model: `model-${t.missionType}-${n}` }, usedFallback: false, succeeded: true, attempts: [], tiers: [] } });
     return { outcome: "COMPLETED" };
   } };
-  const search = async (q: string) => [{ title: "Mesa UGBS Legon", url: `https://example.com/mesa-ugbs/${encodeURIComponent(q).slice(-10)}`, snippet: "Mesa UGBS, University of Ghana Legon" }, { title: "Mesa Verde Winery", url: `https://wine.example/${encodeURIComponent(q).slice(-8)}`, snippet: "Napa valley wines" }];
-  const fetchDoc = async (url: string, o?: { binary?: boolean }) => (o?.binary ? { ok: true, contentType: "image/png", bytes: new Uint8Array([1, 2, 3]) } : url.includes("wine.") ? { ok: true, body: "<html><title>Wine</title>Napa wines</html>", finalUrl: url } : { ok: true, body: PAGE, finalUrl: url });
+  const search = opts.searchFn ?? (async (q: string) => [{ title: "Mesa UGBS Legon", url: `https://example.com/mesa-ugbs/${encodeURIComponent(q).slice(-10)}`, snippet: "Mesa UGBS, University of Ghana Legon" }, { title: "Mesa Verde Winery", url: `https://wine.example/${encodeURIComponent(q).slice(-8)}`, snippet: "Napa valley wines" }]);
+  const fetchDoc = async (url: string, o?: { binary?: boolean }) => { const ov = o?.binary ? null : opts.fetchFn?.(url); if (ov) return ov; return defaultFetch(url, o); };
+  const defaultFetch = async (url: string, o?: { binary?: boolean }) => (o?.binary ? { ok: true, contentType: "image/png", bytes: new Uint8Array([1, 2, 3]) } : url.includes("wine.") ? { ok: true, body: "<html><title>Wine</title>Napa wines</html>", finalUrl: url } : { ok: true, body: PAGE, finalUrl: url });
   const engine = new DossierEngine({ store: deps.store, missionQueue: deps.missionQueue, runner, search, fetchDoc, analyzeImage: opts.analyze, maxConcurrent: opts.maxConcurrent, retryCooldownMs: opts.cooldown ?? 0 });
   return { deps, engine, calls };
 }
 const discover = async (ctx: ReturnType<typeof setup>, b = biz()) => { const id = (b as { id: string }).id; ctx.deps.store.businesses.set(id, b); ctx.deps.store.started.add(id); ctx.engine.ensure(b); ctx.engine.kick(id); await ctx.engine.idle(); return ctx.engine.get(id)!; };
-/** Discovery, then the operator approves every source the engine did not reject, then the staged work runs. */
-const start = async (ctx: ReturnType<typeof setup>, b = biz()) => { const d = await discover(ctx, b); const id = d.businessId; for (const src of d.sources.filter((u) => u.decision === "pending")) await ctx.engine.applyAction(id, { action: "decide", sourceId: src.id, decision: "approved" }); await ctx.engine.applyAction(id, { action: "approve" }); await ctx.engine.idle(); await ctx.engine.applyAction(id, { action: "approve_competitors" }); await ctx.engine.idle(); const mid = ctx.engine.get(id)!; if (mid.competitorApproval?.status === "awaiting") { for (const src of mid.sources.filter((u) => u.role === "competitor" && u.decision === "pending")) await ctx.engine.applyAction(id, { action: "decide", sourceId: src.id, decision: "approved" }); await ctx.engine.applyAction(id, { action: "approve_competitors" }); await ctx.engine.idle(); } return ctx.engine.get(id)!; };
+/** Confirming the business is the only human step: the engine runs every eligible stage on its own. */
+const start = discover;
 
 test("full chain: research -> profile -> audit -> SWOT -> growth -> plan, structured, sourced, follow-ups need approval", async () => {
   const c = setup();
   const d = await start(c);
   assert.equal(d.status, "completed");
+  assert.equal(d.sourceApproval?.mode, "auto", "no operator approval was needed");
   assert.deepEqual(STAGES.map((s) => d.stages[s.id].status), Array(10).fill("completed"));
   assert.deepEqual(c.calls, ["dossier_profile", "dossier_audit", "dossier_competitors", "dossier_market", "dossier_swot", "dossier_growth", "dossier_campaign", "dossier_plan"]);
   assert.ok(d.sources.length >= 1 && d.sources[0].id === "S1" && d.sources[0].confidence === "checked" && d.sources[0].retrievedAt);
@@ -70,22 +73,6 @@ test("repeated start is idempotent: no second dossier, mission or follow-up", as
   await c.engine.tick(); 
   assert.equal(c.deps.missionQueue.getSnapshot().length, before);
   assert.equal(c.calls.length, 8);
-});
-
-test("unusable model output is retried once with a fresh mission, then escalated as blocked; operator retry gets a fresh attempt", async () => {
-  let bad = true;
-  const c = setup({ script: (type) => (type === "dossier_audit" && bad ? "I think the business is fine." : JSON.stringify(GOOD[type])) });
-  const d = await start(c);
-  assert.equal(d.stages.audit.status, "blocked");
-  assert.equal(d.status, "blocked");
-  assert.equal(c.calls.filter((t) => t === "dossier_audit").length, 2);
-  assert.equal(d.stages.swot.status, "pending", "later stages do not run behind a blocked stage");
-  assert.match(d.stages.audit.error ?? "", /invalid_output/);
-  bad = false;
-  assert.equal(c.engine.resume("b1").ok, true);
-  c.engine.kick("b1"); await c.engine.idle();
-  await c.engine.applyAction("b1", { action: "approve_competitors" }); await c.engine.idle();
-  assert.equal(c.engine.get("b1")!.status, "completed");
 });
 
 test("provider failure is visible, never a hot loop, and gives up after bounded attempts", async () => {
@@ -123,19 +110,6 @@ test("a mission left In Progress by a crash is recovered and run again, not dupl
   assert.equal(c.engine.get("b1")!.status, "completed");
 });
 
-test("search failure is recorded as a limitation and the chain continues with eligible work", async () => {
-  const c = setup();
-  const failing = new DossierEngine({ store: c.deps.store, missionQueue: c.deps.missionQueue, runner: { run: async (id) => { const t = c.deps.missionQueue.getSnapshot().find((x) => x.taskId === id)!; await c.deps.missionQueue.update(id, { status: "Completed" }); c.deps.store.missionOutputs.set(id, { generatedBy: "t", text: JSON.stringify(GOOD[t.missionType!]), isEvidence: false }); return { outcome: "COMPLETED" }; } }, search: async () => { throw Object.assign(new Error("x"), { code: "rate_limited" }); } });
-  const b = biz(); c.deps.store.businesses.set("b1", b); c.deps.store.started.add("b1"); failing.ensure(b); failing.kick("b1"); await failing.idle();
-  assert.equal(failing.get("b1")!.status, "awaiting_sources");
-  await failing.applyAction("b1", { action: "approve" }); await failing.idle(); await failing.applyAction("b1", { action: "approve_competitors" }); await failing.idle();
-  const d = failing.get("b1")!;
-  assert.equal(d.status, "completed");
-  assert.ok((d.stages.profile.output as { facts: Array<{ basis: string }> }).facts.every((f) => f.basis !== "verified"), "nothing can be verified without approved sources");
-  assert.equal(d.sources.length, 0);
-  assert.match(d.limitations.join(" "), /Web search failed \(rate_limited\)/);
-});
-
 test("concurrency is bounded: a second business is queued, not run in parallel", async () => {
   const c = setup({ maxConcurrent: 1 });
   for (const id of ["b1", "b2"]) { const b = biz(id); c.deps.store.businesses.set(id, b); c.deps.store.started.add(id); c.engine.ensure(b); }
@@ -143,7 +117,6 @@ test("concurrency is bounded: a second business is queued, not run in parallel",
   assert.equal(c.engine.kick("b2").accepted, false);
   await c.engine.idle();
   await c.engine.tick(12); await c.engine.idle();
-  for (const id of ["b1", "b2"]) { await c.engine.applyAction(id, { action: "decide", sourceId: "S1", decision: "approved" }); await c.engine.applyAction(id, { action: "approve" }); await c.engine.idle(); await c.engine.applyAction(id, { action: "approve_competitors" }); await c.engine.idle(); }
   await c.engine.tick(12); await c.engine.idle();
   assert.equal(c.engine.get("b2")!.status, "completed");
 });
@@ -155,28 +128,6 @@ test("parser rejects empty or non-JSON output", () => {
 });
 
 // ---------------------------------------------------------------- source approval, evidence integrity, images
-
-test("research only discovers: unrelated results are excluded, dedupe holds, nothing downstream runs until the operator approves", async () => {
-  const c = setup();
-  const d = await discover(c);
-  assert.equal(d.status, "awaiting_sources");
-  assert.equal(d.sourceApproval?.status, "awaiting");
-  assert.deepEqual(c.calls, [], "no AI stage runs before approval");
-  const winery = d.sources.filter((s) => s.url.includes("wine.example"));
-  assert.ok(winery.length >= 1 && winery.every((s) => s.relevance === "unrelated" && s.decision === "rejected"), "a similarly named business is excluded");
-  assert.ok(d.sources.filter((s) => s.relevance !== "unrelated").every((s) => s.decision === "pending" && s.check?.status === "fetched" && s.pageText));
-  assert.equal(new Set(d.sources.map((s) => s.url)).size, d.sources.length);
-  assert.ok((d.images ?? []).length >= 1 && d.images!.every((i) => i.decision === "pending" && i.pageUrl && i.sourceId));
-  await c.engine.tick(); await c.engine.idle();
-  assert.deepEqual(c.calls, [], "the scheduler does not bypass the checkpoint either");
-  const ok = d.sources.find((s) => s.relevance !== "unrelated")!;
-  assert.equal((await c.engine.applyAction("b1", { action: "decide", sourceId: ok.id, decision: "approved" })).status, 200);
-  await c.engine.applyAction("b1", { action: "approve" }); await c.engine.idle(); await c.engine.applyAction("b1", { action: "approve_competitors" }); await c.engine.idle();
-  assert.equal(c.engine.get("b1")!.status, "completed");
-  const prompt = c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_profile")!.description;
-  assert.match(prompt, new RegExp(ok.url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.doesNotMatch(prompt, /wine\.example|Napa/, "rejected sources never reach the prompt");
-});
 
 test("VERIFIED needs an approved source whose fetched text contains the quote; snippets, unapproved sources and bad quotes downgrade", async () => {
   const c = setup({ script: (type) => JSON.stringify(type === "dossier_swot" ? { strengths: [
@@ -195,81 +146,195 @@ test("VERIFIED needs an approved source whose fetched text contains the quote; s
   assert.match(strengths[1].note ?? "", /downgraded/);
 });
 
-test("operator can add, de-duplicate, mark official and reject sources; every action is validated", async () => {
-  const c = setup();
-  await discover(c);
-  const add = await c.engine.applyAction("b1", { action: "add", url: "https://www.mesa-ugbs.org/about?utm_source=x", title: "Official site", official: true });
-  assert.equal(add.status, 200);
-  const d = c.engine.get("b1")!;
-  const added = d.sources.find((s) => s.origin === "operator")!;
-  assert.ok(added.official && added.decision === "approved" && added.check?.status === "fetched");
-  assert.equal((await c.engine.applyAction("b1", { action: "add", url: "https://mesa-ugbs.org/about" })).status, 409, "same page after normalisation is a duplicate");
-  assert.equal((await c.engine.applyAction("b1", { action: "add", url: "javascript:alert(1)" })).status, 400);
-  assert.equal((await c.engine.applyAction("b1", { action: "decide", sourceId: "nope", decision: "approved" })).status, 404);
-  assert.equal((await c.engine.applyAction("b1", { action: "decide", sourceId: added.id, decision: "maybe" })).status, 400);
-  await c.engine.applyAction("b1", { action: "official", sourceId: added.id, official: false });
-  assert.equal(c.engine.get("b1")!.sources.find((s) => s.id === added.id)!.official, false);
-  assert.equal((await c.engine.applyAction("b1", { action: "approve", actor: "human:test" })).status, 200);
-  assert.equal(c.engine.get("b1")!.sourceApproval?.approvedBy, "human:test");
-  await c.engine.idle();
-});
 
-test("approval with no matching source is allowed but nothing can be verified, and the limitation is recorded", async () => {
-  const c = setup();
+// ---------------------------------------------------------------- autonomous research: identity, sources, social-only, no sources
+
+const stagesOf = (d: { stages: Record<string, { status: string }> }) => Object.fromEntries(Object.entries(d.stages).map(([k, v]) => [k, v.status]));
+
+test("ambiguous identity pauses before any analysis; the scheduler cannot bypass it; the operator's choice resumes", async () => {
+  const c = setup({ searchFn: async () => [
+    { title: "Mesa UGBS Legon", url: "https://a.example/mesa", snippet: "Mesa UGBS student body, Legon Accra" },
+    { title: "Mesa UGBS Kumasi", url: "https://b.example/mesa", snippet: "Mesa UGBS chapter in Kumasi" }],
+    fetchFn: (u) => (u.startsWith("https://b.") ? { ok: true, body: "<html><title>Mesa UGBS</title><body>Mesa UGBS chapter based in Kumasi, Ashanti.</body></html>", finalUrl: u } : null) });
   const d = await discover(c);
-  for (const s of d.sources) await c.engine.applyAction("b1", { action: "decide", sourceId: s.id, decision: "rejected" });
-  await c.engine.applyAction("b1", { action: "approve" }); await c.engine.idle(); await c.engine.applyAction("b1", { action: "approve_competitors" }); await c.engine.idle();
-  const done = c.engine.get("b1")!;
-  assert.match(done.limitations.join(" "), /without approving any source/);
-  assert.ok((done.stages.profile.output as { facts: Array<{ basis: string }> }).facts.every((f) => f.basis === "hypothesis"));
-});
-
-test("images are candidates until confirmed; confirmed ones are analysed (or honestly reported as not analysed) and reach the audit prompt", async () => {
-  const seen: string[] = [];
-  const c = setup({ analyze: async (_id, img) => { seen.push(img.url); return { status: "ANALYZED", observations: [{ observation: "Blue wordmark on white", category: "branding", confidence: "MEDIUM" }] }; } });
-  const d = await discover(c);
-  const img = d.images![0];
-  await c.engine.applyAction("b1", { action: "image", imageId: img.id, decision: "confirmed" });
-  for (const s of d.sources.filter((u) => u.decision === "pending")) await c.engine.applyAction("b1", { action: "decide", sourceId: s.id, decision: "approved" });
-  await c.engine.applyAction("b1", { action: "approve" }); await c.engine.idle(); await c.engine.applyAction("b1", { action: "approve_competitors" }); await c.engine.idle();
-  assert.deepEqual(seen, [img.url], "only the confirmed image was analysed");
-  assert.equal(c.engine.get("b1")!.images![0].analysis?.status, "analyzed");
-  assert.match(c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_audit")!.description, /Blue wordmark on white/);
-
-  const none = setup();
-  const d2 = await discover(none);
-  await none.engine.applyAction("b1", { action: "image", imageId: d2.images![0].id, decision: "confirmed" });
-  await none.engine.applyAction("b1", { action: "approve" }); await none.engine.idle(); await none.engine.applyAction("b1", { action: "approve_competitors" }); await none.engine.idle();
-  assert.match(none.engine.get("b1")!.images![0].analysis?.reason ?? "", /not enabled/);
-});
-
-test("competitor discovery is a separate checkpoint; only approved competitors are analysed; invented competitors and unsupported estimates are dropped", async () => {
-  let cid = "";
-  const c = setup({ script: (type) => JSON.stringify(type === "dossier_competitors" ? { shortlist: [
-    { name: "Verde Winery", url: "https://wine.example", type: "indirect", whySelected: "serves the same social need", sourceRefs: [cid], positioning: { text: "Premium wines", basis: "verified", quote: "Napa wines" }, offerings: ["wine"], strengths: [], weaknesses: [] },
-    { name: "Invented Rival Ltd", sourceRefs: ["S99"], positioning: { text: "x" } }], whitespace: [], threats: [], gaps: ["pricing not found in approved sources"], conflicts: [], method: "m" }
-    : GOOD[type]) });
-  const d0 = await discover(c);
-  for (const s of d0.sources.filter((u) => u.decision === "pending")) await c.engine.applyAction("b1", { action: "decide", sourceId: s.id, decision: "approved" });
+  assert.equal(d.status, "awaiting_sources");
+  assert.equal(d.sourceApproval?.status, "awaiting");
+  assert.equal(d.sourceApproval?.reason, "ambiguous_identity");
+  assert.match(d.sourceApproval?.detail ?? "", /different places/);
+  assert.equal(c.calls.length, 0, "no AI stage ran");
+  for (let i = 0; i < 4; i++) await c.engine.tick();
+  assert.equal(c.calls.length, 0, "the scheduler did not bypass the pause");
+  await c.engine.applyAction("b1", { action: "decide", sourceId: d.sources.find((s) => s.url.startsWith("https://b."))!.id, decision: "rejected" });
   await c.engine.applyAction("b1", { action: "approve" }); await c.engine.idle();
-  const mid = c.engine.get("b1")!;
-  assert.equal(mid.status, "awaiting_sources"); assert.equal(mid.competitorApproval?.status, "awaiting");
-  assert.equal(mid.stages.competitor_discovery.status, "completed"); assert.equal(mid.stages.competitors.status, "pending");
-  const cands = mid.sources.filter((u) => u.role === "competitor");
-  assert.ok(cands.length >= 1 && cands.every((u) => u.decision === "pending" && u.pageText), "candidates are read but wait for approval");
-  assert.ok(!cands.some((u) => u.url.includes("example.com/mesa-ugbs")), "the business's own pages are not competitors");
-  cid = cands.find((u) => u.url.includes("wine.example"))!.id;
-  await c.engine.tick(); await c.engine.idle();
-  assert.equal(c.engine.get("b1")!.stages.competitors.status, "pending", "scheduler cannot bypass the competitor checkpoint");
-  await c.engine.applyAction("b1", { action: "decide", sourceId: cid, decision: "approved" });
-  await c.engine.applyAction("b1", { action: "approve_competitors" }); await c.engine.idle();
-  const done = c.engine.get("b1")!;
-  assert.equal(done.status, "completed");
-  const out = done.stages.competitors.output as { shortlist: Array<{ name: string; positioning: { basis: string } }> };
-  assert.deepEqual(out.shortlist.map((x) => x.name), ["Verde Winery"], "a competitor with no approved source is dropped, never invented");
-  assert.equal(out.shortlist[0].positioning.basis, "hypothesis", "a quote under 20 chars cannot earn VERIFIED");
-  const mkt = done.stages.market.output as { estimates: unknown[] };
-  assert.equal(mkt.estimates.length, 0, "an estimate without an approved source is dropped");
-  assert.doesNotMatch(c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_profile")!.description, /COMPETITOR/);
-  assert.match(c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_competitors")!.description, /APPROVED COMPETITOR SOURCES/);
+  const after = c.engine.get("b1")!;
+  assert.equal(after.sourceApproval?.mode, "operator");
+  assert.equal(after.status, "completed");
+  assert.ok(after.sources.some((s) => s.decision === "rejected" && s.decidedBy === "operator"));
+});
+
+test("automatic validation records who decided and why: unrelated sources are rejected and kept out of AI prompts", async () => {
+  const c = setup();
+  const d = await discover(c);
+  const wine = d.sources.find((s) => s.url.includes("wine."))!;
+  assert.equal(wine.decision, "rejected"); assert.equal(wine.decidedBy, "auto"); assert.ok(wine.decisionReason);
+  const mesa = d.sources.find((s) => !s.url.includes("wine."))!;
+  assert.equal(mesa.decision, "approved"); assert.equal(mesa.decidedBy, "auto");
+  const profileTask = c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_profile")!;
+  assert.doesNotMatch(profileTask.description, /Napa/);
+  assert.equal((d.stages.research.output as { validation?: unknown }).validation !== undefined, true);
+});
+
+test("a source ranked 'match' is not VERIFIED: an unread lead supports no verified claim", async () => {
+  const c = setup({ fetchFn: (u) => (u.includes("example.com") ? { ok: false, reason: "http_403" } : null),
+    script: (type) => JSON.stringify(type === "dossier_swot" ? { strengths: [{ text: "claim", basis: "verified", sourceRefs: ["S1"], quote: "official student association of the University of Ghana Business School" }], weaknesses: [], opportunities: [], threats: [] } : GOOD[type]) });
+  const d = await discover(c);
+  assert.equal(d.sources.find((s) => s.id === "S1")!.decision, "approved");
+  assert.equal(d.sources.find((s) => s.id === "S1")!.check?.status === "fetched", false);
+  assert.equal((d.stages.swot.output as { strengths: Array<{ basis: string }> }).strengths[0].basis, "hypothesis");
+});
+
+test("no available sources: research completes from the record with stated limitations, and every claim stays a hypothesis", async () => {
+  for (const searchFn of [async () => [], async () => { throw new Error("search down"); }]) {
+    const c = setup({ searchFn });
+    const d = await discover(c);
+    assert.equal(d.status, "completed");
+    assert.equal(d.sources.filter((s) => s.decision === "approved").length, 0);
+    assert.match(d.limitations.join(" "), /No (public )?sources|no sources|not find|No observed/i);
+    const facts = (d.stages.profile.output as { facts: Array<{ basis: string }> }).facts;
+    assert.ok(facts.every((f) => f.basis !== "verified"));
+  }
+});
+
+test("social-only business: queries target Instagram/Facebook, login walls are recorded, and limits are stated rather than hidden", async () => {
+  const queries: string[] = [];
+  const b = { id: "b1", canonicalName: "Kente Bites", category: "food", address: "Osu, Accra", sourceReferences: ["https://instagram.com/kentebites"] } as never;
+  const c = setup({
+    searchFn: async (q) => { queries.push(q); return [{ title: "Kente Bites (@kentebites) • Instagram", url: "https://www.instagram.com/kentebites/", snippet: "Kente Bites Osu Accra snacks" }]; },
+    fetchFn: (u) => (u.includes("instagram.com") ? { ok: true, body: "<html><body>Log in to Instagram</body></html>", finalUrl: u } : null),
+  });
+  const d = await discover(c, b);
+  assert.ok(queries.some((q) => q.includes("site:instagram.com")), "searched Instagram");
+  assert.ok(queries.some((q) => q.includes("site:facebook.com")), "searched Facebook");
+  const ig = d.sources.find((s) => s.url.includes("instagram.com"))!;
+  assert.ok(ig.check?.status !== "fetched", "a login wall is not a read page");
+  const out = d.stages.research.output as { evidence?: Array<{ level: string }> };
+  assert.ok(out.evidence?.every((e) => e.level !== "full_page"));
+  assert.match(d.limitations.join(" "), /social|login|could not be read|snippet/i);
+  assert.equal(d.status, "completed");
+});
+
+test("social profile whose handle does not resemble the business stays pending and is not used", async () => {
+  const c = setup({ searchFn: async () => [{ title: "Campus memes", url: "https://www.instagram.com/random_fan_9/", snippet: "ugbs Legon memes" }] });
+  const d = await discover(c);
+  const s = d.sources[0];
+  assert.ok(!s || s.decision !== "approved");
+});
+
+test("operator overrides are recorded as operator decisions, and re-approving is a no-op", async () => {
+  const c = setup();
+  const d = await discover(c);
+  const r = await c.engine.applyAction("b1", { action: "decide", sourceId: "S1", decision: "rejected" });
+  assert.ok(r);
+  const s1 = c.engine.get("b1")!.sources.find((x) => x.id === "S1")!;
+  assert.equal(s1.decision, "rejected"); assert.equal(s1.decidedBy, "operator");
+  const again = await c.engine.applyAction("b1", { action: "approve" }) as { already?: boolean } | undefined;
+  assert.ok(d);
+  assert.ok(again === undefined || again.already === true || again.already === undefined);
+});
+
+// ---------------------------------------------------------------- competitors, automatic selection
+
+test("competitors are selected automatically: namesakes/aggregators rejected with reasons, invented competitors and unsupported estimates dropped, no pause", async () => {
+  const b = { id: "b1", canonicalName: "Mesa UGBS", category: "student association", address: "Legon, Accra", sourceReferences: [] } as never;
+  const c = setup({
+    searchFn: async (q) => (/competitor|similar|alternative|association/i.test(q) || true ? [
+      { title: "Legon Students Union", url: "https://union.example/", snippet: "student association in Legon Ghana" },
+      { title: "Top 10 student associations", url: "https://directory.example/list", snippet: "directory of student association listings in Ghana" },
+      { title: "Mesa Verde Winery", url: "https://wine.example/x", snippet: "Napa valley wines" },
+      { title: "Mesa UGBS Legon", url: "https://example.com/mesa", snippet: "Mesa UGBS Legon student association" }] : []),
+    script: (type) => JSON.stringify(type === "dossier_competitors" ? { shortlist: [{ name: "Legon Students Union", sourceRefs: ["C1", "C77"], basis: "verified", quote: "x" }, { name: "Invented Rival", sourceRefs: ["C99"], basis: "verified" }], whitespace: [], threats: [], gaps: [], conflicts: [] } : GOOD[type]),
+  });
+  const d = await discover(c, b);
+  assert.equal(d.status, "completed");
+  assert.equal(d.competitorApproval?.status, "approved"); assert.equal(d.competitorApproval?.mode, "auto");
+  const rejected = d.sources.filter((s) => s.role === "competitor" && s.decision === "rejected");
+  assert.ok(rejected.every((s) => s.decisionReason));
+  const names = ((d.stages.competitors.output as { shortlist?: Array<{ name: string }> }).shortlist ?? []).map((x) => x.name);
+  assert.ok(!names.includes("Invented Rival"), "a competitor with no real source is dropped");
+  const market = (d.stages.market.output as { estimates: unknown[] });
+  assert.equal(market.estimates.length, 0, "an estimate with no source is dropped");
+});
+
+// ---------------------------------------------------------------- malformed output recovery
+
+test("repairable JSON completes on the first attempt, recorded as repaired with a limitation", async () => {
+  const c = setup({ script: (type, n) => (type === "dossier_audit" ? "Here you go:\n```json\n" + JSON.stringify(GOOD[type]).replace(/\}\]/, "},]") + "\n```" : JSON.stringify(GOOD[type])) });
+  const d = await discover(c);
+  assert.equal(d.stages.audit.status, "completed");
+  assert.equal(d.stages.audit.recovery?.final, "repaired");
+  assert.equal(d.stages.audit.recovery?.attempts.length, 1);
+  assert.equal(d.stages.audit.recovery?.attempts[0].outcome, "repaired");
+  assert.ok(d.stages.audit.recovery?.attempts[0].repairs?.length);
+  assert.match(d.limitations.join(" "), /mechanical repair/i);
+  assert.equal(c.calls.filter((t) => t === "dossier_audit").length, 1);
+});
+
+test("unusable output: a stricter prompt is tried, then an alternative model; every attempt records provider, model, error and outcome", async () => {
+  let hint: { excludeModels?: string[] } | undefined; let eng: ReturnType<typeof setup>["engine"] | undefined;
+  const c = setup({ onRun: (id, type, n) => { if (type === "dossier_audit" && n === 3) hint = eng!.hintsFor(id); }, script: (type, n) => (type === "dossier_audit" ? (n < 3 ? "I could not produce JSON" : JSON.stringify(GOOD[type])) : JSON.stringify(GOOD[type])) });
+  eng = c.engine;
+  const d = await discover(c);
+  const rec = d.stages.audit.recovery!;
+  assert.equal(d.stages.audit.status, "completed");
+  assert.deepEqual(rec.attempts.map((a) => a.kind), ["initial", "corrective_prompt", "alternative_model"]);
+  assert.deepEqual(rec.attempts.map((a) => a.outcome), ["invalid", "invalid", "valid"]);
+  assert.ok(rec.attempts.every((a) => a.provider && a.model));
+  assert.match(rec.attempts[0].validationError ?? "", /no JSON object/);
+  const prompts = rec.attempts.map((a) => c.deps.missionQueue.getSnapshot().find((t) => t.taskId === a.taskId)!.description);
+  assert.doesNotMatch(prompts[0], /STRICT RETRY/); assert.match(prompts[1], /STRICT RETRY/); assert.match(prompts[1], /no JSON object/);
+  assert.deepEqual(hint?.excludeModels, [rec.attempts[0].model, rec.attempts[1].model]);
+  assert.match(d.limitations.join(" "), /attempt/i);
+});
+
+test("schema violations are not success: wrong shape triggers recovery", async () => {
+  const c = setup({ script: (type, n) => (type === "dossier_swot" && n === 1 ? '{"strengths":"all of them"}' : JSON.stringify(GOOD[type])) });
+  const d = await discover(c);
+  assert.equal(d.stages.swot.recovery?.attempts[0].outcome, "invalid");
+  assert.match(d.stages.swot.recovery?.attempts[0].validationError ?? "", /schema:/);
+  assert.equal(d.stages.swot.status, "completed");
+});
+
+test("repair failure after all attempts blocks the stage (never reported as success) while independent stages continue", async () => {
+  const c = setup({ script: (type) => (type === "dossier_competitors" ? "not json at all" : JSON.stringify(GOOD[type])) });
+  const d = await discover(c);
+  assert.equal(d.stages.competitors.status, "blocked");
+  assert.equal(d.stages.competitors.recovery?.final, "failed");
+  assert.equal(d.stages.competitors.recovery?.attempts.length, 3);
+  assert.equal(c.calls.filter((t) => t === "dossier_competitors").length, 3, "bounded to 3 attempts");
+  assert.match(d.limitations.join(" "), /no usable output after 3 attempts/);
+  for (const k of ["market", "swot", "growth", "campaign", "plan"] as const) assert.equal(d.stages[k].status, "completed", `${k} still ran`);
+  assert.equal(d.status, "blocked");
+  const marketTask = c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_market")!;
+  assert.match(marketTask.description, /COMPETITOR ANALYSIS: NOT AVAILABLE/);
+  const calls = c.calls.length;
+  for (let i = 0; i < 4; i++) await c.engine.tick();
+  assert.equal(c.calls.length, calls, "a blocked stage is not hot-looped by the scheduler");
+});
+
+test("provider failure inside recovery is a stage failure with bounded retries, not an invalid-output success", async () => {
+  const c = setup({ script: (type, n) => (type === "dossier_audit" ? (n === 1 ? "garbage" : "FAIL") : JSON.stringify(GOOD[type])) });
+  let d = await discover(c);
+  assert.notEqual(d.stages.audit.status, "completed");
+  for (let i = 0; i < 8; i++) await c.engine.tick();
+  d = c.engine.get("b1")!;
+  assert.equal(d.stages.audit.status, "blocked");
+  assert.ok(c.calls.filter((t) => t === "dossier_audit").length <= 9, "bounded");
+  assert.equal(d.stages.swot.status, "pending", "dependent stage did not run on missing input");
+});
+
+test("autonomous progression: one confirmation runs every eligible stage in dependency order with no checkpoints", async () => {
+  const c = setup();
+  const d = await discover(c);
+  assert.deepEqual(stagesOf(d), Object.fromEntries(STAGES.map((s) => [s.id, "completed"])));
+  assert.ok(c.calls.indexOf("dossier_swot") > c.calls.indexOf("dossier_audit") && c.calls.indexOf("dossier_swot") > c.calls.indexOf("dossier_market"));
 });

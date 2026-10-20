@@ -1,3 +1,4 @@
+import { evidenceLevel } from "./source-validation";
 import { buildBusinessView } from "./business-view";
 import { DOSSIER_MISSION_TYPES } from "../../src/orchestrator/atlas-pipeline";
 import type { PipelineDeps } from "../../src/orchestrator/atlas-pipeline";
@@ -23,7 +24,7 @@ const PRIORITY: CandidateState[] = ["blocked", "failed", "awaiting_source_approv
 
 const NEXT_ACTION: Record<CandidateState, string> = {
   awaiting_authorization: "Press “Start working” to authorise internal research on this business. Nothing runs until you do.",
-  awaiting_source_approval: "Atlas found candidate sources. Open the results, approve the ones that really belong to this business (and confirm any logos/images), then research continues automatically.",
+  awaiting_source_approval: "Atlas found conflicting sources: the same business name appears in different places. Open the results and confirm which one is yours (approve those, reject the rest). Everything else runs automatically.",
   processing: "Atlas is processing this business. Refresh shortly.",
   researching: "The research dossier is being produced stage by stage. It continues on the server even if you close the browser.",
   evidence_insufficient: "No observed evidence (no website or peer data found), so the score stays withheld. The dossier still works from the saved record and web sources.",
@@ -61,7 +62,7 @@ export function summarizeDossier(d: Dossier | undefined, missions: Array<{ taskI
   if (!d) return null;
   return {
     status: d.status, updatedAt: d.updatedAt, manualRetries: d.manualRetries, sources: d.sources.length, sourceApproval: d.sourceApproval ?? null, sourcesApproved: d.sources.filter((s) => s.decision === "approved").length, sourcesPending: d.sources.filter((s) => (s.decision ?? "pending") === "pending").length, limitations: d.limitations,
-    stages: STAGES.map((s) => { const st = d.stages[s.id]; return { id: s.id, title: s.title, status: st.status, taskId: st.taskId, missionStatus: missions.find((m) => m.taskId === st.taskId)?.status ?? null, attempts: st.attempts, error: st.error, completedAt: st.completedAt, generatedBy: st.generatedBy, dependsOn: s.dependsOn }; }),
+    stages: STAGES.map((s) => { const st = d.stages[s.id]; return { id: s.id, title: s.title, status: st.status, taskId: st.taskId, missionStatus: missions.find((m) => m.taskId === st.taskId)?.status ?? null, attempts: st.attempts, error: st.error, completedAt: st.completedAt, generatedBy: st.generatedBy, dependsOn: s.dependsOn, softDependsOn: s.softDependsOn ?? [], recovery: st.recovery ? { final: st.recovery.final, attempts: st.recovery.attempts } : null }; }),
     followUps: d.followUps.map((f) => ({ ...f, missionStatus: missions.find((m) => m.taskId === f.taskId)?.status ?? null })),
   };
 }
@@ -92,7 +93,7 @@ export function readDossier(deps: PipelineDeps, businessId: string) {
   const d = deps.store.dossiers.get(businessId);
   if (!d) return null;
   const tasks = deps.missionQueue.getSnapshot();
-  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, competitorApproval: d.competitorApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
+  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, evidenceLevel: evidenceLevel({ ...s, pageText } as typeof d.sources[number]), decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, competitorApproval: d.competitorApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
 }
 
 // ---------------------------------------------------------------- start one business

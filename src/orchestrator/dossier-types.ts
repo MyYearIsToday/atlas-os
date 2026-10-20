@@ -2,6 +2,29 @@
 export type StageId = "research" | "profile" | "audit" | "competitor_discovery" | "competitors" | "market" | "swot" | "growth" | "campaign" | "plan";
 export type StageStatus = "pending" | "running" | "completed" | "failed" | "blocked";
 
+/** One attempt to get a usable structured output for an AI stage. Every attempt is kept, failed ones included. */
+export interface RecoveryAttempt {
+  n: number;
+  kind: "initial" | "corrective_prompt" | "alternative_model";
+  taskId: string;
+  provider?: string;
+  model?: string;
+  outcome: "valid" | "repaired" | "invalid";
+  /** Mechanical repairs applied to the model text before it parsed (e.g. removed_trailing_comma, closed_truncated_output). */
+  repairs: string[];
+  validationError?: string;
+  at: string;
+}
+export interface StageRecovery {
+  attempts: RecoveryAttempt[];
+  /** "repaired" = usable only after mechanical repair; "failed" = no valid output after every bounded attempt. */
+  final: "valid" | "repaired" | "failed" | null;
+  /** Models that already answered unusably; the alternative-model attempt must not reuse them. */
+  avoidModels?: string[];
+  /** Index into attempts where the current bounded round began (operator retries start a new round; history is kept). */
+  round?: number;
+}
+
 export interface StageRecord {
   status: StageStatus;
   taskId: string | null;
@@ -12,6 +35,7 @@ export interface StageRecord {
   error: string | null;
   generatedBy: string | null;
   output: unknown | null;
+  recovery?: StageRecovery;
 }
 
 export type SourceDecision = "pending" | "approved" | "rejected";
@@ -23,6 +47,9 @@ export interface SourceRef {
   relevance?: "match" | "possible" | "unrelated";
   reasons?: string[];
   decision?: SourceDecision;
+  /** Who made the decision. "auto" = Atlas validated it for INTERNAL use; it never makes a claim verified by itself. */
+  decidedBy?: "auto" | "operator";
+  decisionReason?: string;
   official?: boolean;
   origin?: "search" | "record" | "operator";
   /** "competitor" sources describe another business and are shown/approved separately from the business's own sources. */
@@ -49,9 +76,9 @@ export interface Dossier {
   limitations: string[];
   followUps: FollowUpRef[];
   manualRetries: number;
-  /** Operator checkpoint: stages after research wait until sources are approved. */
-  sourceApproval?: { status: "awaiting" | "approved"; approvedAt?: string; approvedBy?: string; approvedCount?: number };
+  /** Sources are validated automatically after research. Stages wait only when mode is not set and status is awaiting (ambiguous identity). */
+  sourceApproval?: { status: "awaiting" | "approved"; approvedAt?: string; approvedBy?: string; approvedCount?: number; mode?: "auto" | "operator"; reason?: "ambiguous_identity"; detail?: string };
   /** Second operator checkpoint: candidate competitors. Only approved competitor sources are analysed. */
-  competitorApproval?: { status: "awaiting" | "approved"; approvedAt?: string; approvedBy?: string; approvedCount?: number };
+  competitorApproval?: { status: "awaiting" | "approved"; approvedAt?: string; approvedBy?: string; approvedCount?: number; mode?: "auto" | "operator"; rejectedCount?: number };
   images?: ImageRef[];
 }

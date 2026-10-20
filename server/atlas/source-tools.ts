@@ -137,6 +137,20 @@ export function htmlToText(html: string): string {
   return html.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]+>/g, " ")
     .replace(/&(amp|lt|gt|quot|#39|nbsp|apos);/g, (m) => ENT[m] ?? " ").replace(/\s+/g, " ").trim();
 }
+/** Public description meta tags (og:title, og:description, description, twitter:description). Social profiles often expose a bio here even behind a login wall. */
+export function htmlMeta(html: string): string {
+  const out: string[] = [];
+  for (const m of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = m[0];
+    const key = /(?:property|name)\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]?.toLowerCase();
+    if (!key || !["og:title", "og:description", "description", "twitter:title", "twitter:description"].includes(key)) continue;
+    const content = /content\s*=\s*"([^"]*)"/i.exec(tag)?.[1] ?? /content\s*=\s*'([^']*)'/i.exec(tag)?.[1];
+    if (!content) continue;
+    const text = content.replace(/&(amp|lt|gt|quot|#39|nbsp|apos);/g, (e) => ENT[e] ?? " ").replace(/\s+/g, " ").trim();
+    if (text && !out.includes(text)) out.push(text);
+  }
+  return out.join(" | ");
+}
 export const htmlTitle = (html: string) => (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
 
 export interface ImageCandidate { url: string; role: "og_image" | "icon" | "logo" | "page_image" }

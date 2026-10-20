@@ -160,7 +160,7 @@ export class WorkforceProvider implements AIProvider {
 
     const messages = (request.messages as ChatMessage[] | undefined) ?? [{ role: "user", content: request.task }];
     try {
-      const r = await this.executor.execute({ employee: target.employee, messages, maxTokens: request.maxTokens, temperature: request.temperature, context: request });
+      const r = await this.executor.execute({ employee: target.employee, messages, maxTokens: request.maxTokens, temperature: request.temperature, context: request, excludeModels: request.excludeModels });
       const inner = r.data as AIProviderSuccess;
       const out: WorkforceSuccess = {
         ...inner,

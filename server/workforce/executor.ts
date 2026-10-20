@@ -68,6 +68,8 @@ export interface ExecuteInput {
   temperature?: number;
   /** Opaque caller context forwarded to callModel (e.g. the original AIJobRequest). */
   context?: unknown;
+  /** Model ids to skip (already tried and unusable). Recorded as skipped_excluded; never replaced by anything paid. */
+  excludeModels?: string[];
 }
 
 export interface ExecuteResult {
@@ -161,12 +163,13 @@ export class WorkforceExecutor {
 
     const attempts: AttemptTrace[] = [];
     const required = detectMedia(input.messages) as Modality[];
-    const capable = entry.chain.filter((c) => required.every((m) => c.inputModalities.includes(m)));
+    const excluded = new Set(input.excludeModels ?? []);
+    const capable = entry.chain.filter((c) => required.every((m) => c.inputModalities.includes(m)) && !excluded.has(c.model));
     for (const c of entry.chain) {
-      if (!capable.includes(c)) attempts.push({ providerId: c.providerId, model: c.model, outcome: "skipped_capability", ms: 0 });
+      if (!capable.includes(c)) attempts.push({ providerId: c.providerId, model: c.model, outcome: excluded.has(c.model) ? "skipped_excluded" : "skipped_capability", ms: 0 });
     }
     if (capable.length === 0) {
-      throw new WorkforceError("NO_CAPABLE_MODEL", 422, `No model configured for "${input.employee}" accepts: ${required.join(", ")}`, attempts);
+      throw new WorkforceError("NO_CAPABLE_MODEL", 422, excluded.size ? `No alternative free model is available for "${input.employee}" (already tried: ${[...excluded].join(", ")})` : `No model configured for "${input.employee}" accepts: ${required.join(", ")}`, attempts);
     }
 
     const deadline = this.d.now() + this.d.totalBudgetMs;
