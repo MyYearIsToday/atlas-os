@@ -22,8 +22,8 @@ const ok = buildManualCandidate(valid);
 check("valid input builds a manual discovery candidate", ok.valid && ok.candidate.name === "Golden Bean Café" && ok.candidate.source === "manual" && ok.candidate.category === "catering.cafe");
 check("missing business name is rejected", errorFields(buildManualCandidate({ ...valid, businessName: "   " })).includes("businessName"));
 check("missing category is rejected", errorFields(buildManualCandidate({ ...valid, category: "" })).includes("category"));
-check("missing address is rejected", errorFields(buildManualCandidate({ ...valid, address: undefined as unknown as string })).includes("address"));
-check("a wholly empty submission reports all three required fields", ["businessName", "category", "address"].every((f) => errorFields(buildManualCandidate({} as ManualBusinessInput)).includes(f as never)));
+check("address is optional (intake redesign)", buildManualCandidate({ ...valid, address: undefined }).valid === true);
+check("a wholly empty submission reports the two required fields", ["businessName", "category"].every((f) => errorFields(buildManualCandidate({} as ManualBusinessInput)).includes(f as never)));
 
 // --- Optional fields ---
 const full = buildManualCandidate({ ...valid, latitude: "5.6037", longitude: -0.187, website: "goldenbean.com", phone: "+233 24 123 4567", source: "Facebook page", notes: "  Met the owner  " });

@@ -16,6 +16,14 @@ export interface DiscoveryCandidate {
   phone?: string;
   website?: string;
   notes?: string;
+  email?: string;
+  contactName?: string;
+  city?: string;
+  country?: string;
+  socialLinks?: string[];
+  goals?: string[];
+  relationship?: string;
+  intakeSource?: string;
   source: string;
   sourceUrl?: string;
   sourceMetadata?: ProviderSourceMetadata;

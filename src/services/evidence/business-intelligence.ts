@@ -19,6 +19,13 @@ export interface BusinessIntelligence {
   website?: string;
   notes?: string;
   socialLinks: string[];
+  /** Operator-supplied intake context (unverified; never treated as evidence). */
+  contactName?: string;
+  city?: string;
+  country?: string;
+  goals?: string[];
+  relationship?: string;
+  intakeSource?: string;
   googleProfileUrl?: string;
   hours?: Record<string, string>;
   services: string[];

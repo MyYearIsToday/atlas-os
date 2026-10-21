@@ -87,7 +87,10 @@ export function buildCandidateView(ctx: CandidateContext) {
     const inPipeline = deps.store.started.has(row.businessId);
     const dossier = deps.store.dossiers.get(row.businessId);
     const states = deriveStates(row, { inPipeline, observationCount: (deps.store.observations.get(row.businessId) ?? []).length, dossier });
-    return { ...row, inPipeline, state: states[0], states, nextAction: NEXT_ACTION[states[0]], dossier: summarizeDossier(dossier, tasks) };
+    const rec = byId.get(row.businessId);
+    const origin = rec?.sourceReferences?.includes("manual") ? "manual" : "discovered";
+    const intake = rec ? { socialLinks: rec.socialLinks ?? [], goals: rec.goals ?? [], relationship: rec.relationship, city: rec.city, country: rec.country, intakeSource: rec.intakeSource } : undefined;
+    return { ...row, origin, intake, inPipeline, state: states[0], states, nextAction: NEXT_ACTION[states[0]], dossier: summarizeDossier(dossier, tasks) };
   }).sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
 }
 
@@ -134,7 +137,7 @@ export async function startCandidate(ctx: ActionContext, businessId: unknown, wa
       dispatch = ctx.orchestrator.log.all().slice(logged).find((e) => e.event === "BusinessDiscovered")?.outcome ?? "UNKNOWN";
     }
     const inPipeline = deps.store.started.has(businessId);
-    if (!inPipeline) return { ok: false as const, businessId, dispatch, pipeline: "not_started" };
+    if (!inPipeline) return { ok: false as const, businessId, dispatch, pipeline: "not_started", message: dispatch === "BLOCKED_DUPLICATE" || /DUPLICATE/.test(dispatch) ? "This looks like a duplicate of an existing business, so it was not started. Review it first." : "The business was saved but could not enter the research pipeline (dispatch: " + dispatch + ")." };
     const existing = ctx.engine.get(businessId);
     ctx.engine.ensure(business);
     const resumed = existing ? ctx.engine.resume(businessId) : { ok: true };
@@ -146,7 +149,11 @@ export async function startCandidate(ctx: ActionContext, businessId: unknown, wa
   const timeout = Symbol("timeout");
   const result = await Promise.race([work.catch((e: unknown) => ({ failed: e instanceof Error ? e.message : String(e) })), new Promise<typeof timeout>((r) => setTimeout(r, waitMs))]);
   if (result === timeout) { void work.catch(() => undefined); return { status: 202, body: { ok: true, running: true, businessId, note: "Still starting; refresh to see progress." } }; }
-  if ("failed" in result) return { status: 502, body: { ok: false, error: "start_failed", businessId } };
+  if ("failed" in result) {
+    // Detail stays in the server log; the client gets a stable, safe explanation it can act on.
+    console.error(`[atlas-scout] start failed businessId=${businessId}: ${String(result.failed).slice(0, 200)}`);
+    return { status: 502, body: { ok: false, error: "start_failed", businessId, message: "Atlas could not start work on this business. Nothing was sent or published. Try again; if it keeps failing, check the server logs." } };
+  }
   return { status: result.ok ? 200 : 409, body: result };
 }
 
@@ -212,6 +219,7 @@ export function readMissionResult(deps: PipelineDeps, taskId: string) {
   const text = out?.text?.trim() ?? "";
   const outcome = t.status === "Failed" ? "failed" : t.status !== "Completed" ? (t.status === "In Progress" ? "running" : "not_run") : text ? "result" : "completed_without_output";
   const dossier = t.clientId ? deps.store.dossiers.get(t.clientId) : undefined;
+  if (dossier) upgradeDossier(dossier);
   const stage = dossier ? STAGES.find((s) => dossier.stages[s.id].taskId === taskId) : undefined;
   return {
     taskId, title: t.title, businessId: t.clientId ?? null, missionType: t.missionType ?? null, status: t.status, approvalRequired: t.approvalRequired,

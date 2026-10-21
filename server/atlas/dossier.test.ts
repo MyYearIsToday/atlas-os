@@ -568,3 +568,15 @@ test("a symbol-only image that could not be decided without a reference is recon
   await c.engine.applyAction("b1", { action: "images_revalidate" });
   assert.equal(calls, after, "decided images are not judged again");
 });
+
+test("intake context: operator-supplied social profiles are research starting points and goals/notes are labelled unverified; contact details never reach AI prompts", async () => {
+  const c = setup({ searchFn: async () => [] });
+  const b = { ...(biz() as object), socialLinks: ["https://www.instagram.com/mesa_ugbs/"], goals: ["pr"], notes: "Runs student events", email: "secret.contact@example.org", contactName: "Ama Private", city: "Legon", country: "Ghana" } as never;
+  const d = await discover(c, b);
+  const s = d.sources.find((x) => x.url.includes("instagram.com/mesa_ugbs"));
+  assert.ok(s, "social profile seeded as a source"); assert.equal(s!.origin, "record");
+  const prompts = c.deps.missionQueue.getSnapshot().map((t) => t.description).join("\n");
+  assert.match(prompts, /Social profiles supplied by the operator/);
+  assert.match(prompts, /unverified/);
+  assert.doesNotMatch(prompts, /secret\.contact@example\.org|Ama Private/);
+});

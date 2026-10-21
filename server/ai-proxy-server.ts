@@ -39,6 +39,8 @@ import { DossierEngine, missionContext } from "./atlas/dossier";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 
 let scoutDiscoveryEnabled = false;
+/** What discovery has actually done since this server process started (enabled != running/finding businesses). */
+export const scoutDiscoveryStatus: { enabled: boolean; source?: string; intervalMs?: number; startedAt?: string; lastRun: { at: string; ok: boolean; candidatesFound: number; created: number; error?: string } | null } = { enabled: false, lastRun: null };
 /** The scheduler's own repository + orchestrator, shared with manual entry so both feed one pipeline. */
 let scoutPipeline: { repository: InMemoryBusinessRepository; orchestrator: AtlasOrchestrator } | null = null;
 /** Downstream Atlas pipeline (evidence -> score -> audit -> mission). Opt-in via ATLAS_PIPELINE_ENABLED=true. */
@@ -127,7 +129,8 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     chunks.push(chunk as Buffer);
   }
   const raw = Buffer.concat(chunks).toString("utf-8");
-  return raw ? JSON.parse(raw) : {};
+  try { return raw ? JSON.parse(raw) : {}; }
+  catch { throw Object.assign(new Error("Malformed JSON request body"), { code: "BAD_JSON" }); }
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -389,7 +392,7 @@ export function createAiProxyServer(
         };
         let status = 200; let payload: unknown;
         if (method === "GET" && url === "/api/scout/candidates") {
-          payload = { durable: !!atlasPipeline.persistence, items: buildCandidateView({ discovered: scoutPipeline.repository.list(), pipeline: { deps: atlasPipeline.deps, autonomy: atlasPipeline.autonomy } }) };
+          payload = { durable: !!atlasPipeline.persistence, discovery: scoutDiscoveryStatus, items: buildCandidateView({ discovered: scoutPipeline.repository.list(), pipeline: { deps: atlasPipeline.deps, autonomy: atlasPipeline.autonomy } }) };
         } else if (method === "POST" && url === "/api/scout/candidates/start") {
           const body = await readJsonBody(req);
           ({ status, body: payload } = await startCandidate(actionCtx, (body as { businessId?: unknown } | null)?.businessId));
@@ -513,9 +516,15 @@ export function createAiProxyServer(
       logRequest(method, url, 404, Date.now() - started);
     } catch (error) {
       const isBodyTooLarge = error instanceof Error && (error as any).code === "BODY_TOO_LARGE";
+      if (error instanceof Error && (error as any).code === "BAD_JSON") {
+        sendJson(res, 400, { failed: true, code: "INVALID_RESPONSE", reason: "The request body was not valid JSON" });
+        logRequest(method, url, 400, Date.now() - started);
+        return;
+      }
+      const errorRef = Math.random().toString(36).slice(2, 8);
       // The client only ever sees "Internal error"; record the cause server-side (name, message and the throwing frame only; no request data or secrets).
-      if (!isBodyTooLarge) console.error(`[atlas-proxy] unhandled error ${method} ${url}: ${error instanceof Error ? `${error.name}: ${error.message.slice(0, 200)} @ ${(error.stack ?? "").split("\n")[1]?.trim().slice(0, 160) ?? "?"}` : "non-Error thrown"}`);
-      sendJson(res, isBodyTooLarge ? 413 : 500, { failed: true, code: isBodyTooLarge ? "INVALID_RESPONSE" : "PROVIDER_UNAVAILABLE", reason: isBodyTooLarge ? "Request body too large" : "Internal error" });
+      if (!isBodyTooLarge) console.error(`[atlas-proxy] unhandled error ref=${errorRef} ${method} ${url}: ${error instanceof Error ? `${error.name}: ${error.message.slice(0, 200)} @ ${(error.stack ?? "").split("\n")[1]?.trim().slice(0, 160) ?? "?"}` : "non-Error thrown"}`);
+      sendJson(res, isBodyTooLarge ? 413 : 500, { failed: true, code: isBodyTooLarge ? "INVALID_RESPONSE" : "PROVIDER_UNAVAILABLE", reason: isBodyTooLarge ? "Request body too large" : `Internal error (ref ${errorRef}). The server logged the details.` });
       logRequest(method, url, isBodyTooLarge ? 413 : 500, Date.now() - started);
     }
   });
@@ -655,6 +664,7 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       dispatch: (type, payload) => orchestrator.dispatch(type, payload),
     });
     scheduler.onRun((result) => {
+      scoutDiscoveryStatus.lastRun = { at: new Date().toISOString(), ok: result.ok, candidatesFound: result.candidatesFound, created: result.outcomes.filter((o) => o.action === "CREATED").length, ...(result.error ? { error: "The discovery source returned an error; see server logs." } : {}) };
       console.log(`[atlas-scout] run ${result.ok ? "succeeded" : "failed"} candidates=${result.candidatesFound}${result.error ? ` error=${JSON.stringify(result.error)}` : ""}`);
       // TEMPORARY observability (counts only, no business data): proves normalize -> dedupe -> persist -> dispatch.
       try {
@@ -679,6 +689,7 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
     discoveryTrigger = () => runner0.triggerNow();
     scoutPipeline = { repository, orchestrator };
     scoutDiscoveryEnabled = true;
+    Object.assign(scoutDiscoveryStatus, { enabled: true, source: discoverySource, intervalMs, startedAt: new Date().toISOString() });
     console.log(`[atlas-scout] discovery enabled source=${discoverySource} intervalMs=${intervalMs}`);
     return scheduler;
   } catch (error) {

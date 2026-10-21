@@ -1,6 +1,7 @@
 import type { BusinessDiscoveryProvider, DiscoveryCandidate, DiscoveryQuery } from "../evidence/provider-interfaces";
 import { runScoutDiscovery, type CandidateOutcome, type DispatchBusinessDiscovered } from "./discovery-loop";
 import type { BusinessRepository } from "./business-repository";
+import { normalizeSocial } from "./social-profiles";
 
 /**
  * Manual business entry. A human-supplied business is turned into the same
@@ -11,7 +12,17 @@ import type { BusinessRepository } from "./business-repository";
 export interface ManualBusinessInput {
   businessName: string;
   category: string;
-  address: string;
+  address?: string | null;
+  city?: string | null;
+  country?: string | null;
+  /** Handle or full profile URL; a bare handle needs `socialPlatform`. Up to 5 more via `socialProfiles`. */
+  social?: string | null;
+  socialPlatform?: string | null;
+  socialProfiles?: Array<{ value?: string | null; platform?: string | null }> | null;
+  contactName?: string | null;
+  email?: string | null;
+  goals?: string[] | null;
+  relationship?: string | null;
   latitude?: number | string | null;
   longitude?: number | string | null;
   website?: string | null;
@@ -21,13 +32,16 @@ export interface ManualBusinessInput {
 }
 
 export interface ManualEntryFieldError {
-  field: keyof ManualBusinessInput;
+  field: keyof ManualBusinessInput | "social";
   message: string;
 }
 
 export const MANUAL_SOURCE_ID = "manual";
 
-const LIMITS = { businessName: 200, category: 100, address: 300, website: 300, phone: 30, source: 100, notes: 1000 } as const;
+const LIMITS = { businessName: 200, category: 100, address: 300, city: 100, country: 80, contactName: 120, email: 200, relationship: 40, website: 300, phone: 30, source: 100, notes: 1000 } as const;
+export const GOAL_OPTIONS = ["poor_visibility", "inconsistent_content", "weak_engagement", "brand_awareness", "pr", "lead_generation", "other"] as const;
+export const RELATIONSHIP_OPTIONS = ["prospect", "existing_client", "former_client", "referral"] as const;
+export const SOURCE_OPTIONS = ["Manual entry", "Scout discovery", "Referral", "Other"] as const;
 
 const clean = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
 const blank = (value: unknown): boolean => value === undefined || value === null || (typeof value === "string" && value.trim() === "");
@@ -57,17 +71,21 @@ export type ManualValidationResult =
 /** Pure: validate raw form input and build the existing candidate shape. */
 export function buildManualCandidate(input: ManualBusinessInput): ManualValidationResult {
   const errors: ManualEntryFieldError[] = [];
-  const fail = (field: keyof ManualBusinessInput, message: string) => errors.push({ field, message });
+  const fail = (field: keyof ManualBusinessInput | "social", message: string) => errors.push({ field, message });
   const source = (input ?? ({} as ManualBusinessInput));
 
   const name = clean(source.businessName);
   const category = clean(source.category);
   const address = clean(source.address);
+  const city = clean(source.city);
+  const country = clean(source.country);
+  const contactName = clean(source.contactName);
+  const email = clean(source.email);
   if (!name) fail("businessName", "Business name is required");
   if (!category) fail("category", "Category is required");
-  if (!address) fail("address", "Address is required");
+  if (email && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]{2,}$/.test(email)) fail("email", "Enter a valid email address");
 
-  for (const field of ["businessName", "category", "address", "website", "phone", "source", "notes"] as const) {
+  for (const field of ["businessName", "category", "address", "city", "country", "contactName", "email", "relationship", "website", "phone", "source", "notes"] as const) {
     const value = clean(source[field]);
     if (value.length > LIMITS[field]) fail(field, `Must be at most ${LIMITS[field]} characters`);
     else if (value && field !== "notes" && hasControlChars(value)) fail(field, "Contains invalid characters");
@@ -101,6 +119,20 @@ export function buildManualCandidate(input: ManualBusinessInput): ManualValidati
     else phone = raw;
   }
 
+  const socialLinks: string[] = [];
+  const socialInputs = [{ value: source.social, platform: source.socialPlatform }, ...(Array.isArray(source.socialProfiles) ? source.socialProfiles.slice(0, 5) : [])];
+  for (const entry of socialInputs) {
+    if (!entry || blank(entry.value)) continue;
+    const r = normalizeSocial(clean(entry.value), clean(entry.platform) || null);
+    if (!r.ok) fail("social", r.message);
+    else if (!socialLinks.includes(r.profile.url)) socialLinks.push(r.profile.url);
+  }
+
+  const goals = Array.isArray(source.goals) ? [...new Set(source.goals.map((g) => clean(g)).filter(Boolean))] : [];
+  if (goals.some((g) => !(GOAL_OPTIONS as readonly string[]).includes(g))) fail("goals", "Unknown goal selected");
+  const relationship = clean(source.relationship);
+  if (relationship && !(RELATIONSHIP_OPTIONS as readonly string[]).includes(relationship)) fail("relationship", "Unknown client status");
+
   if (errors.length) return { valid: false, errors };
 
   const sourceLabel = clean(source.source);
@@ -108,13 +140,22 @@ export function buildManualCandidate(input: ManualBusinessInput): ManualValidati
   // Stable identity so resubmitting the same name+address updates rather than duplicates; fuzzy
   // near-duplicates are still caught by the existing assessDuplicate path in the loop.
   const identity = (value: string) => value.toLowerCase().replace(/\s+/g, " ");
+  const place = address || [city, country].filter(Boolean).join(", ");
   return {
     valid: true,
     candidate: {
-      externalId: `${identity(name)}|${identity(address)}`,
+      externalId: `${identity(name)}|${identity(place)}`,
       name,
       category,
-      address,
+      address: address || undefined,
+      city: city || undefined,
+      country: country || undefined,
+      email: email || undefined,
+      contactName: contactName || undefined,
+      socialLinks: socialLinks.length ? socialLinks : undefined,
+      goals: goals.length ? goals : undefined,
+      relationship: relationship || undefined,
+      intakeSource: sourceLabel || undefined,
       latitude,
       longitude,
       phone,

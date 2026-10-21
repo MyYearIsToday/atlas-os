@@ -212,7 +212,11 @@ const SPEC: Record<Exclude<StageId, "research" | "competitor_discovery">, string
 };
 
 function contextBlock(b: BusinessIntelligence, d: Dossier, store: PipelineStore, upTo: StageId): string {
-  const record = [`Name: ${b.canonicalName}`, `Category: ${b.category ?? "unknown"}`, `Address: ${b.address ?? "unknown"}`, `Website: ${b.website ?? "none on record"}`, `Phone: ${b.phone ?? "none on record"}`].join("\n");
+  const record = [`Name: ${b.canonicalName}`, `Category: ${b.category ?? "unknown"}`, `Address: ${b.address ?? "unknown"}`, `Website: ${b.website ?? "none on record"}`, `Phone: ${b.phone ?? "none on record"}`,
+    ...(b.socialLinks?.length ? [`Social profiles supplied by the operator (starting points only; verify from sources): ${b.socialLinks.join(", ")}`] : []),
+    ...(b.goals?.length ? [`Goals/problems the operator believes apply (unverified, do not treat as findings): ${b.goals.join(", ")}`] : []),
+    ...(b.relationship ? [`Relationship status (operator-stated): ${b.relationship}`] : []),
+    ...(b.notes ? [`Operator notes (unverified context): ${clip(b.notes, 600)}`] : [])].join("\n");
   const observed = (store.observations.get(b.id) ?? []).slice(0, 25).map((o) => `- ${o.field} = ${clip(typeof o.value === "string" ? o.value : JSON.stringify(o.value), 160)} [${o.observability}${o.sourceUrl ? `, ${o.sourceUrl}` : ""}]`).join("\n") || "none";
   const score = store.scores.get(b.id);
   const approved = d.sources.filter((s) => s.decision === "approved" && s.role !== "competitor");
@@ -363,10 +367,10 @@ export class DossierEngine {
 
   private async research(b: BusinessIntelligence, x: Dossier, st: StageRecord) {
     const name = b.canonicalName;
-    const place = [b.address, "Ghana"].filter(Boolean).join(" ");
+    const place = [b.address ?? b.city, b.country ?? "Ghana"].filter(Boolean).join(" ");
     const queries = [`"${name}" ${place}`, `"${name}" official website`, `"${name}" facebook instagram linkedin`, `"${name}" reviews`, `"${name}" news events`,
       // A business with no website lives on social channels: look for those directly.
-      ...(b.website ? [] : [`site:instagram.com "${name}"`, `site:facebook.com "${name}" ${b.address ?? "Ghana"}`])];
+      ...(b.website || (b.socialLinks?.length ?? 0) > 0 ? [] : [`site:instagram.com "${name}"`, `site:facebook.com "${name}" ${b.address ?? "Ghana"}`])];
     const facts = { name, address: b.address, website: b.website, phone: b.phone, category: b.category };
     let status: "ok" | "not_configured" | "failed" = this.d.search ? "ok" : "not_configured";
     let error: string | undefined;
@@ -381,6 +385,7 @@ export class DossierEngine {
       x.sources.push(src); byKey.set(key, src);
     };
     if (b.website) addSource({ url: b.website, title: `${name} — website on record` }, "business record", "record");
+    for (const link of b.socialLinks ?? []) addSource({ url: link, title: `${name} — social profile supplied by the operator` }, "operator-supplied profile", "record");
     if (this.d.search) {
       for (const q of queries) {
         try { for (const r of (await this.d.search(q)).slice(0, 6)) addSource(r, q, "search"); }
