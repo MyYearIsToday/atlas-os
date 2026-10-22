@@ -1,5 +1,6 @@
 import type { SourceRef } from "../../src/orchestrator/dossier-types";
 import { hostOf, nameTokens, type BusinessFacts } from "./source-tools";
+import { extractContacts } from "./site-inspection";
 
 /**
  * Automatic, explainable validation of candidate sources, replacing the blocking operator approval step.
@@ -21,11 +22,54 @@ export function evidenceLevel(src: SourceRef): EvidenceLevel {
   return src.snippet ? "snippet_only" : "none";
 }
 
+const CC_SLD = new Set(["com", "co", "org", "net", "gov", "edu", "ac"]);
+const sld = (host: string) => { const p = host.split("."); const labels = p.length >= 3 && CC_SLD.has(p[p.length - 2]) && p[p.length - 1].length === 2 ? p.slice(0, -2) : p.slice(0, -1); return (labels[labels.length - 1] ?? "").replace(/[^a-z0-9]/g, ""); };
+const edit = (a: string, b: string) => { const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]); for (let j = 1; j <= b.length; j++) d[0][j] = j; for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); return d[a.length][b.length]; };
+
+/**
+ * A domain that resembles the business's recorded website (same name on another TLD, one letter different, hyphenated) but is NOT
+ * that website or one of its subdomains. Returns the candidate's host, or null. Such a page may belong to someone else entirely.
+ */
+export function lookalikeDomain(ownWebsite: string | null | undefined, candidateUrl: string): string | null {
+  const own = ownWebsite ? hostOf(ownWebsite) : "", cand = hostOf(candidateUrl);
+  if (!own || !cand || cand === own || cand.endsWith(`.${own}`) || own.endsWith(`.${cand}`)) return null;
+  const a = sld(own), b = sld(cand);
+  if (a.length < 5 || b.length < 5) return null;
+  return a === b || edit(a, b) <= (a.length >= 9 ? 2 : 1) ? cand : null;
+}
+
+/** Acronym-style words (UGBS) in a name usually name a parent or host institution; the remaining words name this entity. */
+export function parentGuard(name: string): { parents: string[]; distinct: string[] } {
+  const words = name.split(/\s+/).map((w) => w.replace(/[^A-Za-z0-9]/g, "")).filter(Boolean);
+  const parents = words.filter((w) => w.length >= 3 && w === w.toUpperCase() && /[A-Z]/.test(w));
+  if (!parents.length || parents.length >= words.length) return { parents: [], distinct: [] };
+  const lower = parents.map((p) => p.toLowerCase());
+  return { parents, distinct: nameTokens(name).filter((t) => !lower.includes(t)) };
+}
+
+export interface ContactConflict { sourceId: string; detail: string }
+/** Official-site contact details that no other full-name source shares are a conflict, not a corroboration. */
+export function findContactConflicts(official: { phones: string[]; emails: string[] }, sources: SourceRef[]): ContactConflict[] {
+  const digits = (p: string) => p.replace(/\D/g, "").slice(-9);
+  const ownPhones = new Set(official.phones.map(digits)); const ownEmails = new Set(official.emails.map((e) => e.toLowerCase()));
+  const out: ContactConflict[] = [];
+  for (const s of sources) {
+    if (s.role === "competitor" || s.official || s.decidedBy === "operator" || !s.pageText || !(s.reasons ?? []).some((r) => r.includes("full business name"))) continue;
+    const c = extractContacts("", s.pageText);
+    const phoneClash = ownPhones.size > 0 && c.phones.length > 0 && !c.phones.some((p) => ownPhones.has(digits(p)));
+    const mailClash = ownEmails.size > 0 && c.emails.length > 0 && !c.emails.some((e) => ownEmails.has(e));
+    if (phoneClash || mailClash) out.push({ sourceId: s.id, detail: `${phoneClash ? `phone ${c.phones[0]}` : `email ${c.emails[0]}`} differs from the official site's ${phoneClash ? `phone ${official.phones[0]}` : `email ${official.emails[0]}`}` });
+  }
+  return out;
+}
+
 export function decideBusinessSource(b: BusinessFacts, src: SourceRef): Verdict {
   const reasons = src.reasons ?? [];
+  const lk = !src.official && src.kind !== "social" ? lookalikeDomain(b.website, src.url) : null;
+  if (lk) return { decision: "pending", reason: `look-alike domain: ${lk} resembles the recorded website but is a different domain; not used until the operator confirms it is the same business` };
   if (src.relevance === "unrelated") return { decision: "rejected", reason: reasons.join("; ") || "does not appear to be about this business" };
   if (src.relevance !== "match") return { decision: "pending", reason: `not used until confirmed: ${reasons[reasons.length - 1] ?? "identity not established"}` };
-  const strong = has(reasons, "same domain") || has(reasons, "phone number");
+  const strong = has(reasons, "same domain") || has(reasons, "phone number") || has(reasons, "linked from the official website");
   if (src.kind === "social" && !strong) {
     // A social profile must look like THIS business: its handle resembles the name, or its title/snippet carries the full name.
     const handle = norm((() => { try { return new URL(src.url).pathname.split("/").filter(Boolean)[0] ?? ""; } catch { return ""; } })()).replace(/ /g, "");

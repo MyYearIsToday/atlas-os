@@ -11,7 +11,7 @@ const GOOD: Record<string, unknown> = {
   dossier_market: { audience: [{ text: "Students", basis: "hypothesis", sourceRefs: [] }], localContext: [], trends: [], opportunities: [{ title: "Event content", rationale: "r", basis: "hypothesis" }], threats: [], barriers: [], unknowns: ["demand data"], estimates: [{ description: "invented market size", method: "guess", uncertainty: "high", sourceRefs: [] }] },
   dossier_campaign: { objective: "o", pillars: [{ name: "Events", rationale: "r" }], channels: [{ channel: "Instagram", why: "w", constraints: "c" }], campaigns: [{ name: "Launch", objective: "o", audience: "a", message: "m", callToAction: "c", channels: ["Instagram"], kpis: [{ metric: "reach", measurement: "insights" }] }], sequence: [{ activity: "Draft", dependsOn: "approval" }], content: [{ campaign: "Launch", platform: "Instagram", format: "post", draft: "Hello Legon", creativeBrief: "b" }], assumptions: [] },
   dossier_swot: { strengths: [{ text: "Brand tied to UGBS", basis: "verified", sourceRefs: ["S1"], quote: "official student association of the University of Ghana Business School" }], weaknesses: [], opportunities: [{ text: "Event content", basis: "hypothesis", sourceRefs: [] }], threats: [{ text: "Other associations", basis: "unknown", sourceRefs: [] }] },
-  dossier_growth: { recommendations: [{ title: "Launch a website", area: "visibility", rationale: "none exists", priority: "high", effort: "medium", basis: "hypothesis", sourceRefs: [] }] },
+  dossier_growth: { recommendations: [{ title: "Launch a website", kind: "experiment", area: "visibility", currentSituation: "no website was found in the approved sources", rationale: "A hypothesis: without a website, students searching for the association cannot find its events or contacts.", priority: "high", effort: "medium", intendedOutcome: "more event enquiries from search", successMetric: "monthly enquiries from the site", nextSteps: ["Draft a one-page site outline for operator review"], basis: "hypothesis", sourceRefs: [] }] },
   dossier_plan: { dossierSummary: "Summary.", actionPlan: [{ title: "Build site", description: "d", owner: "Atlas", timeframe: "30 days" }], followUps: [{ title: "Draft outreach to the association", description: "draft", assignedAI: "closer", external: true }, { title: "Competitor scan", description: "scan", assignedAI: "finance", external: false }], limitations: ["No score"] },
 };
 
@@ -579,4 +579,132 @@ test("intake context: operator-supplied social profiles are research starting po
   assert.match(prompts, /Social profiles supplied by the operator/);
   assert.match(prompts, /unverified/);
   assert.doesNotMatch(prompts, /secret\.contact@example\.org|Ama Private/);
+});
+
+// ---------------------------------------------------------------- deep research: website inspection, social, identity, conflicts, quality gates
+
+const page = (title: string, body: string, extra = "") => `<html><head><title>${title}</title><meta name="description" content="${title} description">${extra}</head><body>${body}</body></html>`;
+const FILL = "We run programmes and events for members every semester across the campus and publish updates for the community regularly. ".repeat(6);
+const siteFetch = (map: Record<string, string | { ok: false; reason: string }>) => (u: string) => {
+  const hit = Object.entries(map).find(([k]) => u === k || u === `${k}/`);
+  if (!hit) return { ok: false, reason: "http_404" };
+  return typeof hit[1] === "string" ? { ok: true, body: hit[1], finalUrl: u } : hit[1];
+};
+const withSite = (b: object) => ({ ...(biz() as object), ...b }) as never;
+
+test("deep website inspection reads linked internal pages, records what was and was not read, and flags JS-only and failed pages", async () => {
+  const fetchFn = siteFetch({
+    "https://mesa.example": page("Mesa UGBS", `<h1>Mesa UGBS</h1><a href="/about">About us</a><a href="/services">Our programmes</a><a href="/contact">Contact</a><a href="/files/brochure.pdf">Brochure</a><a href="https://other.example/about">Elsewhere</a><a href="https://www.instagram.com/mesa_ugbs/">IG</a><p>${FILL}</p>`),
+    "https://mesa.example/about": page("About Mesa UGBS", `<h1>About</h1><p>Mesa UGBS is the official student association of the University of Ghana Business School. ${FILL}</p>`),
+    "https://mesa.example/services": page("Programmes", `<div id="root"></div><script src="a.js"></script><script src="b.js"></script><script src="c.js"></script>`),
+    "https://mesa.example/contact": { ok: false, reason: "timeout" },
+  });
+  const c = setup({ searchFn: async () => [], fetchFn });
+  const d = await discover(c, withSite({ website: "https://mesa.example" }));
+  const w = d.inspection!.website!;
+  assert.deepEqual(w.pages.map((p) => `${p.role}:${p.status}`), ["home:read", "about:read", "services:read", "contact:failed"]);
+  assert.equal(w.pages.find((p) => p.role === "contact")!.reason, "timeout");
+  assert.equal(w.pages.find((p) => p.role === "services")!.rendering, "js_required");
+  assert.ok(!w.pages.some((p) => /other\.example|brochure/.test(p.url)), "external and file links are never followed");
+  assert.ok(w.socialLinks.includes("https://www.instagram.com/mesa_ugbs/"));
+  assert.ok(w.limits.some((l) => /JavaScript/.test(l)) || d.limitations.some((l) => /JavaScript/.test(l)));
+  assert.ok(d.limitations.some((l) => /could not be read \(timeout\)/.test(l)));
+  assert.ok(d.sources.some((s) => s.url.endsWith("/about") && s.decision === "approved" && s.check?.status === "fetched"), "inspected pages become evidence sources");
+  const profilePrompt = c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_profile")!.description;
+  assert.match(profilePrompt, /IDENTITY AND INSPECTION LEDGER/); assert.match(profilePrompt, /\[about\]/); assert.match(profilePrompt, /NOT READ \(timeout\)/);
+});
+
+test("invalid, blocked and unreachable websites are reported honestly and never crash research", async () => {
+  for (const [website, fetchFn] of [["not a url", undefined], ["https://blocked.example", () => ({ ok: false, reason: "host_not_allowed" })], ["https://slow.example", () => ({ ok: false, reason: "timeout" })]] as const) {
+    const c = setup({ searchFn: async () => [], fetchFn: fetchFn as never });
+    const d = await discover(c, withSite({ website }));
+    assert.equal(d.stages.research.status, "completed");
+    assert.ok(d.inspection!.website!.limits.length >= 1, website);
+    assert.ok(d.inspection!.website!.limits.every((l) => !/does not exist|is down/i.test(l) || /does not show/.test(l)));
+    assert.equal(d.inspection!.website!.pages.filter((p) => p.status === "read").length, 0);
+  }
+});
+
+test("ZtouchStudio: the recorded site is trusted; a look-alike domain with the same name is held back, not used as evidence", async () => {
+  const OWN = "https://ztouchstudio.com";
+  const fetchFn = siteFetch({
+    [OWN]: page("ZtouchStudio", `<h1>ZtouchStudio</h1><a href="/about">About</a><p>ZtouchStudio is a photography studio in Osu, Accra. ${FILL}</p>`),
+    [`${OWN}/about`]: page("About ZtouchStudio", `<p>ZtouchStudio is a photography and video studio in Osu, Accra offering portraits and weddings. ${FILL}</p>`),
+    "https://ztouchstudios.com/about": page("ZtouchStudio", `<p>ZtouchStudio wedding venue hire in Accra, a different business entirely. ${FILL}</p>`),
+  });
+  const c = setup({ searchFn: async () => [{ title: "ZtouchStudio", url: "https://ztouchstudios.com/about", snippet: "ZtouchStudio Accra" }], fetchFn });
+  const d = await discover(c, withSite({ id: "z1", canonicalName: "ZtouchStudio", category: "photography", address: "Osu, Accra", website: OWN }));
+  const own = d.sources.filter((s) => s.url.startsWith(OWN));
+  assert.ok(own.length >= 2 && own.every((s) => s.decision === "approved" && s.official));
+  const twin = d.sources.find((s) => s.url.includes("ztouchstudios.com"))!;
+  assert.equal(twin.decision, "pending"); assert.match(twin.decisionReason ?? "", /look-alike domain/);
+  assert.ok(d.limitations.some((l) => /look-alike domain/.test(l)));
+  const prompts = c.deps.missionQueue.getSnapshot().map((t) => t.description).join("\n");
+  assert.doesNotMatch(prompts, /wedding venue hire/);
+  assert.match(prompts, /photography and video studio/);
+});
+
+test("Mesa UGBS is not UGBS: a page about the parent institution is rejected, and the entity's own page is kept", async () => {
+  const fetchFn = siteFetch({
+    "https://ugbs.edu.example/": page("University of Ghana Business School (UGBS)", `<p>UGBS offers MBA and undergraduate programmes at Legon. UGBS admissions, UGBS faculty and UGBS research. ${FILL}</p>`),
+    "https://mesa.example/": page("Mesa UGBS", `<p>Mesa UGBS is the student association based at UGBS Legon. ${FILL}</p>`),
+  });
+  const c = setup({ searchFn: async () => [{ title: "UGBS - University of Ghana Business School", url: "https://ugbs.edu.example/", snippet: "UGBS Legon business school" }, { title: "Mesa UGBS", url: "https://mesa.example/", snippet: "Mesa UGBS students Legon" }], fetchFn });
+  const d = await discover(c);
+  const school = d.sources.find((s) => s.url.startsWith("https://ugbs.edu"))!;
+  assert.equal(school.decision, "rejected"); assert.match((school.reasons ?? []).join(";"), /parent or host organisation \(UGBS\)/);
+  assert.equal(d.sources.find((s) => s.url.startsWith("https://mesa.example"))!.decision, "approved");
+  const prompts = c.deps.missionQueue.getSnapshot().map((t) => t.description).join("\n");
+  assert.doesNotMatch(prompts, /MBA and undergraduate programmes/);
+});
+
+test("contradictory contact details are a recorded conflict, and the conflicting source is not used", async () => {
+  const fetchFn = siteFetch({
+    "https://mesa.example": page("Mesa UGBS", `<p>Mesa UGBS, Legon, Accra. Call +233 24 412 3456 or write to info@mesa.example. ${FILL}</p>`),
+    "https://directory.example/mesa": page("Mesa UGBS listing", `<p>Mesa UGBS Legon Accra. Phone 0201 999 888, email other@elsewhere.example. ${FILL}</p>`),
+  });
+  const c = setup({ searchFn: async () => [{ title: "Mesa UGBS listing", url: "https://directory.example/mesa", snippet: "Mesa UGBS Legon" }], fetchFn });
+  const d = await discover(c, withSite({ website: "https://mesa.example" }));
+  assert.equal(d.inspection!.conflicts.length, 1);
+  const s = d.sources.find((x) => x.url.includes("directory.example"))!;
+  assert.equal(s.decision, "pending"); assert.match(s.decisionReason ?? "", /conflicting details/);
+  assert.ok(d.limitations.some((l) => /Conflicting contact details/.test(l)));
+  assert.match(c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_profile")!.description, /CONFLICTS \(not resolved\)/);
+});
+
+test("social: public description tags are OBSERVED, unreadable profiles are UNKNOWN (never inactive or absent), and known accounts are never to be 'created'", async () => {
+  const ig = `<html><head><title>Mesa UGBS (@mesa_ugbs) • Instagram</title><meta property="og:description" content="1,204 Followers, 310 Following, 87 Posts - Mesa UGBS (@mesa_ugbs) on Instagram: &quot;Student events and mentorship at UGBS Legon. DM to book.&quot;"></head><body>Log in Sign up</body></html>`;
+  const fetchFn = siteFetch({ "https://www.instagram.com/mesa_ugbs/": ig, "https://www.tiktok.com/@mesa_ugbs": { ok: false, reason: "http_403" } });
+  const c = setup({ searchFn: async () => [], fetchFn });
+  const d = await discover(c, withSite({ socialLinks: ["https://www.instagram.com/mesa_ugbs/", "https://www.tiktok.com/@mesa_ugbs"] }));
+  const [i, t] = [d.inspection!.social.find((o) => o.platform === "instagram")!, d.inspection!.social.find((o) => o.platform === "tiktok")!];
+  assert.equal(i.access, "meta_only"); assert.equal(i.followers, "1,204"); assert.equal(i.posts, "87");
+  assert.match(i.observed.join(" "), /1,204 followers/); assert.match(i.inferred.join(" "), /events|education/);
+  assert.ok(i.inaccessible.some((x) => /feed|posts|engagement/.test(x)));
+  assert.equal(t.access, "unreachable"); assert.equal(t.observed.length, 0); assert.ok(t.inaccessible.length > 0);
+  assert.ok(d.limitations.some((l) => /UNKNOWN/.test(l) && /not show the accounts are inactive or absent/.test(l)));
+  const prompt = c.deps.missionQueue.getSnapshot().find((t2) => t2.missionType === "dossier_profile")!.description;
+  assert.match(prompt, /Never recommend creating an account on these platforms/); assert.match(prompt, /never "inactive" or "absent"/);
+});
+
+test("recommendation quality gate: unsupported, reasoning-free, metric-free and 'create an account' recommendations are rejected; valid JSON alone is not enough", () => {
+  const ctx = { refs: new Set(["S1"]), text: new Map([["S1", "Mesa UGBS runs events and mentorship"]]), official: new Set<string>(), accounts: new Map([["instagram", "https://www.instagram.com/mesa_ugbs/"]]) } as never;
+  const good = { title: "Publish an events calendar", area: "content", kind: "finding-based", currentSituation: "The site lists events only in free text", rationale: "Events are the main activity but are not scannable, so members cannot plan attendance ahead of time.", priority: "high", effort: "low", intendedOutcome: "higher attendance", successMetric: "RSVPs per event", nextSteps: ["Draft a monthly calendar for operator review"], basis: "hypothesis", sourceRefs: ["S1"] };
+  const bad = [
+    { ...good, title: "Create an Instagram account", rationale: "Set up an Instagram account so the association can be found by students on the platform." },
+    { ...good, title: "Post more", sourceRefs: [] },
+    { ...good, title: "Be better", rationale: "short" },
+    { ...good, title: "No metric", successMetric: "", nextSteps: [] },
+  ];
+  const out = parseStageOutput("growth", JSON.stringify({ recommendations: [...bad, good] }), ctx) as { recommendations: unknown[]; rejected?: string[] };
+  assert.equal(out.recommendations.length, 1); assert.equal(out.rejected!.length, 4);
+  assert.ok(out.rejected!.some((r) => /already known/.test(r)));
+  assert.throws(() => parseStageOutput("growth", JSON.stringify({ recommendations: bad }), ctx), /quality:/);
+});
+
+test("research quality is judged on gathered evidence: nothing read means 'insufficient', stated in limitations", async () => {
+  const c = setup({ searchFn: async () => [] });
+  const d = await discover(c, withSite({ website: undefined }));
+  assert.equal(d.inspection!.quality!.level, "insufficient");
+  assert.ok(d.limitations.some((l) => /evidence is insufficient/.test(l)));
 });

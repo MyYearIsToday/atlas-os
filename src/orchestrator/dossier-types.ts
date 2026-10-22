@@ -51,7 +51,7 @@ export interface SourceRef {
   decidedBy?: "auto" | "operator";
   decisionReason?: string;
   official?: boolean;
-  origin?: "search" | "record" | "operator";
+  origin?: "search" | "record" | "operator" | "website" | "chat";
   /** "competitor" sources describe another business and are shown/approved separately from the business's own sources. */
   role?: "business" | "competitor";
   check?: { status: "fetched" | "failed" | "not_checked"; at?: string; reason?: string };
@@ -101,6 +101,40 @@ export interface ImageRef {
   rights: { status: "unknown" | "owner_permission" | "licensed" | "not_permitted"; note: string; updatedBy?: string; updatedAt?: string };
 }
 export const DEFAULT_IMAGE_RIGHTS = { status: "unknown" as const, note: "Belongs to the business or a third party. Reuse in published marketing needs the owner's permission or a licence; none is recorded." };
+
+// ---- deep research evidence ledger (what was actually inspected, and what was not)
+export type PageRole = "home" | "about" | "services" | "contact" | "team" | "portfolio" | "pricing" | "events" | "blog" | "other";
+export interface InspectedPage {
+  url: string; finalUrl?: string; role: PageRole; at: string;
+  status: "read" | "failed";
+  reason?: string; httpStatus?: number;
+  title?: string; description?: string; headings: string[]; textChars: number; excerpt: string;
+  emails: string[]; phones: string[]; socialLinks: string[];
+  rendering: "static" | "js_required";
+}
+export interface WebsiteInspection {
+  site: string; startedAt: string; finishedAt: string;
+  pages: InspectedPage[];
+  /** Set when the supplied address ended on a different domain. The content is still the operator-supplied site, but this is flagged. */
+  redirectedToOtherDomain?: string;
+  contacts: { emails: string[]; phones: string[] };
+  socialLinks: string[];
+  limits: string[];
+}
+export type SocialAccess = "full_page" | "meta_only" | "login_wall" | "unreachable" | "not_checked";
+export interface SocialObservation {
+  platform: string; url: string; handle?: string;
+  access: SocialAccess; checkedAt: string; reason?: string;
+  title?: string; bio?: string;
+  followers?: string; following?: string; posts?: string; likes?: string;
+  /** Plain statements taken directly from readable text. */
+  observed: string[];
+  /** Interpretation of the observed text only; never presented as fact. */
+  inferred: string[];
+  /** What Atlas could not see, so nobody mistakes a gap for a finding. */
+  inaccessible: string[];
+  themes: string[];
+}
 export interface FollowUpRef { key: string; taskId: string; title: string; assignedAI: string; external: boolean }
 
 export interface Dossier {
@@ -118,4 +152,8 @@ export interface Dossier {
   /** Second operator checkpoint: candidate competitors. Only approved competitor sources are analysed. */
   competitorApproval?: { status: "awaiting" | "approved"; approvedAt?: string; approvedBy?: string; approvedCount?: number; mode?: "auto" | "operator"; rejectedCount?: number };
   images?: ImageRef[];
+  /** Evidence ledger from deep inspection: website pages read, social profiles observed, conflicts found, research quality. */
+  inspection?: { website?: WebsiteInspection; social: SocialObservation[]; conflicts: string[]; quality?: { level: "sufficient" | "thin" | "insufficient"; reasons: string[]; assessedAt: string } };
+  /** Entity identity established by the profile stage and used by every later stage. */
+  identity?: { entityType: string; distinctFrom: string[] };
 }

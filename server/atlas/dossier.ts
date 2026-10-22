@@ -4,9 +4,12 @@ import type { BusinessIntelligence } from "../../src/services/evidence/business-
 import type { MissionQueueRepository, Task } from "../../src/services/mission-queue";
 import { DEFAULT_IMAGE_RIGHTS, type Dossier, type FollowUpRef, type ImageAssessment, type ImageRef, type SourceRef, type StageId, type StageRecord } from "../../src/orchestrator/dossier-types";
 import { recoverJsonObject, validateShape } from "./json-recovery";
-import { decideBusinessSource, decideCompetitorSource, detectIdentityAmbiguity, evidenceLevel, industryTokens } from "./source-validation";
+import { decideBusinessSource, decideCompetitorSource, detectIdentityAmbiguity, evidenceLevel, findContactConflicts, industryTokens } from "./source-validation";
 import { buildAssociationPrompt, decideImage, parseAssociation, sniffImage, type BusinessIdentity } from "./image-association";
-import { classifySource, extractImages, htmlMeta, htmlTitle, htmlToText, normalizeUrl, quoteSupported, scoreRelevance, type FetchDoc } from "./source-tools";
+import { classifySource, extractImages, htmlMeta, htmlTitle, htmlToText, normalizeUrl, quoteSupported, scoreRelevance, type FetchDoc, type FetchedDoc } from "./source-tools";
+import { inspectWebsite } from "./site-inspection";
+import { contradictsKnownAccount, knownPlatforms, parseSocialProfile, socialContextBlock } from "./social-intel";
+import type { SocialPlatform } from "../../src/services/scout/social-profiles";
 
 /**
  * Staged internal dossier engine: research -> profile -> audit -> SWOT -> growth -> action plan (+ follow-up missions).
@@ -42,7 +45,7 @@ export interface DossierDeps {
 
 type Item = { text: string; basis: "verified" | "hypothesis" | "unknown"; sourceRefs: string[]; quote?: string; note?: string };
 /** What a claim may cite: approved source ids, their fetched text, and the operator-marked official URLs. */
-export interface EvidenceCtx { refs: Set<string>; text: Map<string, string>; official: Set<string> }
+export interface EvidenceCtx { refs: Set<string>; text: Map<string, string>; official: Set<string>; /** Social platforms where an account is already known. */ accounts?: Map<SocialPlatform, string> }
 const asCtx = (c: EvidenceCtx | Set<string>): EvidenceCtx => (c instanceof Set ? { refs: c, text: new Map(), official: new Set() } : c);
 const AGENTS = new Set(["scout", "builder", "operator", "closer"]); // never "finance"
 const MAX_STAGE_ATTEMPTS = 3;
@@ -122,6 +125,8 @@ function normaliseStageOutput(stage: StageId, o: Record<string, unknown>, eviden
       }).filter(Boolean);
       const out = { name: clip(o.name, 200), industry: clip(o.industry, 200) || "unknown", productsServices: strs(o.productsServices), location: clip(o.location, 200) || "unknown", targetAudience: clip(o.targetAudience, 300) || "unknown", website: clip(o.website, 300) || "unknown", socialAccounts: (Array.isArray(o.socialAccounts) ? o.socialAccounts : []).slice(0, 8).map((a) => ({ platform: clip((a as Record<string, unknown>)?.platform, 40), url: clip((a as Record<string, unknown>)?.url, 300), basis: validRefs.official.has(normalizeUrl(clip((a as Record<string, unknown>)?.url, 300))) ? "verified" : "hypothesis" })).filter((a) => a.url), brandNotes: clip(o.brandNotes, 600), facts, unknowns: strs(o.unknowns) };
       if (!out.name) throw new Error("profile has no name");
+      (out as Record<string, unknown>).entityType = clip(o.entityType, 80) || "unknown";
+      (out as Record<string, unknown>).distinctFrom = strs(o.distinctFrom, 6, 120);
       return out;
     }
     case "audit": {
@@ -144,7 +149,23 @@ function normaliseStageOutput(stage: StageId, o: Record<string, unknown>, eviden
         return { title, area, rationale: clip(x?.rationale, 500), priority: ["high", "medium", "low"].includes(String(x?.priority)) ? x.priority : "medium", effort: clip(x?.effort, 80) || "unknown", currentSituation: clip(x?.currentSituation, 300) || "not established from approved sources", intendedOutcome: clip(x?.intendedOutcome, 300) || "not stated", successMetric: clip(x?.successMetric, 200) || "not stated", dependencies: strs(x?.dependencies, 5, 160), risks: strs(x?.risks, 5, 160), nextSteps: strs(x?.nextSteps, 6, 200), kind: String(x?.kind) === "experiment" ? "experiment" : "finding-based", basis: it?.basis ?? "hypothesis", sourceRefs: it?.sourceRefs ?? [], ...(it?.quote ? { quote: it.quote } : {}), ...(it?.note ? { note: it.note } : {}) };
       }).filter(Boolean);
       if (!recs.length) throw new Error("no growth recommendations");
-      return { recommendations: recs };
+      // Quality gate: valid JSON is not success. A finding-based recommendation must rest on an approved source; every recommendation needs
+      // reasoning, a concrete next step and a measurable outcome; "create an account" is rejected where an account is already known.
+      const known = validRefs.accounts ?? new Map<SocialPlatform, string>();
+      const rejected: string[] = [];
+      const kept = (recs as Array<Record<string, any>>).filter((r) => {
+        const text = `${r.title} ${r.rationale} ${(r.nextSteps ?? []).join(" ")}`;
+        const clash = contradictsKnownAccount(text, known);
+        if (clash) { rejected.push(`"${r.title}" recommends creating a ${clash} account but one is already known`); return false; }
+        const experiment = r.kind === "experiment";
+        if (!experiment && !(r.sourceRefs?.length)) { rejected.push(`"${r.title}" cites no approved source (label it kind "experiment" with a hypothesis instead)`); return false; }
+        if (String(r.rationale ?? "").length < 40) { rejected.push(`"${r.title}" gives no reasoning that links the finding to the action`); return false; }
+        if (!(r.nextSteps?.length) || /^(not stated|unknown)?$/i.test(String(r.successMetric ?? "").trim())) { rejected.push(`"${r.title}" lacks a next step or a measurable success metric`); return false; }
+        if (!experiment && /^not established/i.test(String(r.currentSituation ?? ""))) { rejected.push(`"${r.title}" states no observed current situation`); return false; }
+        return true;
+      });
+      if (!kept.length) throw new Error(`quality: no recommendation met the evidence/reasoning/action/metric standard (${rejected.slice(0, 3).join("; ")})`);
+      return { recommendations: kept, ...(rejected.length ? { rejected } : {}) };
     }
     case "plan": {
       const actionPlan = (Array.isArray(o.actionPlan) ? o.actionPlan : []).slice(0, 12).map((a, i) => { const x = a as Record<string, unknown>; return { step: i + 1, title: clip(x?.title, 160), description: clip(x?.description, 500), owner: clip(x?.owner, 80) || "Atlas / operator", timeframe: clip(x?.timeframe, 80) || "unspecified", dependencies: strs(x?.dependencies, 5, 160), assumptions: strs(x?.assumptions, 5, 160) }; }).filter((a) => a.title);
@@ -196,12 +217,13 @@ const PREAMBLE = [
   "Only the APPROVED SOURCES listed below may be cited, and they are the only sources about THIS business. Never attribute another business's reviews, products, accounts or news to it.",
   "Never invent facts, URLs, numbers, metrics, benchmarks, reviews, contacts or access to any platform. If something is not in the facts, say it is unknown. A failed search or missing source is NOT proof that something does not exist.",
   'Label every claim with "basis": "verified" ONLY if you cite an approved source id (e.g. S1) in "sourceRefs" AND give in "quote" a passage of at least 20 characters copied exactly from that source\'s PAGE TEXT. A search snippet alone, or a source that merely mentions the business, does not verify a claim. Otherwise use "hypothesis" (plausible, needs confirmation) or "unknown" (insufficient evidence).',
+  "Establish what kind of entity this is before analysing it. A parent, host or similarly named organisation (e.g. a university for a student association) is a DIFFERENT entity: its facts are never this entity's facts. Recommendations must link an observed finding to reasoning, a practical action, a priority and a measurable outcome; do not recommend creating a social account where one is already known; a profile that could not be read is unknown, not inactive.",
   "Do not infer general local-market problems. Do not give scores or conclusions that the evidence cannot support; say what evidence is missing instead.",
   "Respond with ONE JSON object only, no prose, no markdown fences.",
 ].join("\n");
 
 const SPEC: Record<Exclude<StageId, "research" | "competitor_discovery">, string> = {
-  profile: `JSON keys: name, industry, productsServices[string], location, targetAudience, website, socialAccounts[{platform,url}] (only accounts listed in approved sources), brandNotes, facts[{claim,basis,sourceRefs[string],quote,confidence:"high|medium|low"}], unknowns[string]. Use "unknown" for missing values.`,
+  profile: `JSON keys: name, entityType (what KIND of entity this is, e.g. "private company", "student association", "university department", "non-profit"), distinctFrom[string] (parent, host or similarly named organisations this entity must NOT be confused with), industry, productsServices[string], location, targetAudience, website, socialAccounts[{platform,url}] (only accounts listed in approved sources), brandNotes, facts[{claim,basis,sourceRefs[string],quote,confidence:"high|medium|low"}], unknowns[string]. Use "unknown" for missing values.`,
   audit: `JSON keys: summary(string), strengths[], weaknesses[], gaps[], improvementOpportunities[] where each item is {text,basis,sourceRefs[string],quote}. Cover positioning, website and search visibility, social presence, reputation, content and partnerships ONLY as far as the approved sources show; for each area with no evidence write an "unknown" item stating what is missing. Include the visual brand assets section below if any were confirmed.`,
   competitors: `JSON keys: shortlist[{name,url,type:"direct|indirect",whySelected,sourceRefs[string],positioning,offerings[string],pricing,strengths[],weaknesses[],digitalPresence,reputation}] where positioning/pricing/digitalPresence/reputation and each strength/weakness are {text,basis,sourceRefs[string],quote}, whitespace[], threats[] (items), gaps[string] (what could NOT be established for each competitor: say "not found in the approved sources", never "does not exist"), conflicts[string] (conflicting evidence, kept visible), method(string: how competitors were chosen). ONLY competitors present in the APPROVED COMPETITOR SOURCES may appear, each citing their source ids. Pricing only if a source states it; otherwise omit and list it under gaps. Direct = same offer for the same customers; indirect = different offer serving the same need.`,
   market: `JSON keys: audience[], localContext[], trends[], threats[], barriers[] (items {text,basis,sourceRefs[string],quote}), opportunities[{title,rationale,constraints,basis,sourceRefs[string],quote}], estimates[{description,method,uncertainty,sourceRefs[string]}] (ONLY if an approved source supports it; otherwise an empty array), unknowns[string]. Consider Ghana-specific context (locations, mobile-first and social-led discovery, realistic budgets, businesses with limited digital infrastructure) only where the sources or the business record support it; never rely on stereotypes. No market sizes, demographics or prices unless a source states them.`,
@@ -210,6 +232,23 @@ const SPEC: Record<Exclude<StageId, "research" | "competitor_discovery">, string
   growth: `JSON key: recommendations[{title,area:"positioning|visibility|content|social|reputation|acquisition",kind:"finding-based|experiment",currentSituation,rationale,priority:"high|medium|low",effort,intendedOutcome,successMetric,dependencies[string],risks[string],nextSteps[string],basis,sourceRefs[string],quote}]. Use the competitor and market analysis above. First state currentSituation from approved sources; do not default to "build a website / improve SEO / post more" without checking what already exists. Mark kind "experiment" for proposals that test a hypothesis. successMetric must be measurable but must not contain invented baseline numbers.`,
   plan: `JSON keys: dossierSummary(string, <=6 sentences), actionPlan[{title,description,owner,timeframe,dependencies[string],assumptions[string]}], followUps[{title,description,assignedAI:"scout|builder|operator|closer",external:boolean}] (max ${MAX_FOLLOW_UPS}; set external:true for anything that would contact, publish or spend), limitations[string] (missing data, unavailable sources). Timeframes must be tied to scope and dependencies and state assumptions; otherwise use "unspecified". No arbitrary dates.`,
 };
+
+/** The shared, evidence-backed picture every stage and the chat start from: identity, what was inspected, what was not, conflicts. */
+export function evidenceLedger(b: BusinessIntelligence, d: Dossier): string {
+  const i = d.inspection; const lines: string[] = [];
+  if (d.identity) lines.push(`Entity type (from the profile stage): ${d.identity.entityType}.${d.identity.distinctFrom.length ? ` It is DISTINCT from: ${d.identity.distinctFrom.join(", ")}. Facts about those are not facts about this entity.` : ""}`);
+  const w = i?.website;
+  if (w) {
+    lines.push(`Website ${w.site}: ${w.pages.filter((p) => p.status === "read").length} of ${w.pages.length} page(s) read.${w.redirectedToOtherDomain ? ` NOTE: it redirects to ${w.redirectedToOtherDomain}.` : ""}`);
+    for (const p of w.pages) lines.push(p.status === "read" ? `  - [${p.role}] ${p.finalUrl ?? p.url} — "${clip(p.title, 80)}" (${p.textChars} chars${p.rendering === "js_required" ? ", JavaScript-rendered: content unknown" : ""}); headings: ${p.headings.slice(0, 5).join(" | ") || "none"}` : `  - [${p.role}] ${p.url} — NOT READ (${p.reason})`);
+    if (w.contacts.phones.length || w.contacts.emails.length) lines.push(`  Contact details published on the site: ${[...w.contacts.phones, ...w.contacts.emails].join(", ")}`);
+  } else if (b.website) lines.push(`Website ${b.website}: not inspected.`);
+  else lines.push("No website is on record. Not having one recorded does not prove the business has none.");
+  lines.push(socialContextBlock(i?.social ?? [], knownPlatforms([...(b.socialLinks ?? []), ...(w?.socialLinks ?? []), ...d.sources.filter((u) => u.kind === "social" && u.role !== "competitor" && u.decision !== "rejected").map((u) => u.url)])));
+  if (i?.conflicts.length) lines.push(`CONFLICTS (not resolved): ${i.conflicts.join("; ")}`);
+  if (i?.quality) lines.push(`Research evidence quality: ${i.quality.level} (${i.quality.reasons.join("; ")})`);
+  return lines.join("\n");
+}
 
 function contextBlock(b: BusinessIntelligence, d: Dossier, store: PipelineStore, upTo: StageId): string {
   const record = [`Name: ${b.canonicalName}`, `Category: ${b.category ?? "unknown"}`, `Address: ${b.address ?? "unknown"}`, `Website: ${b.website ?? "none on record"}`, `Phone: ${b.phone ?? "none on record"}`,
@@ -228,7 +267,7 @@ function contextBlock(b: BusinessIntelligence, d: Dossier, store: PipelineStore,
     .map((s) => `## ${s.title} (already produced)\n${clip(JSON.stringify(d.stages[s.id].output), 3500)}`).join("\n\n");
   const comp0 = d.stages.competitors;
   const unavailable = ["market", "swot", "growth", "campaign", "plan"].includes(upTo) && comp0.status === "blocked" ? `\n\n--- COMPETITOR ANALYSIS: NOT AVAILABLE ---\nIt could not be produced (${comp0.error ?? "gave up after repeated attempts"}). Say that competitors are not established; do not invent them.` : "";
-  return [`--- BUSINESS RECORD ---\n${record}`, `--- OBSERVED EVIDENCE (collected by Atlas) ---\n${observed}`, `--- OPPORTUNITY SCORE ---\n${score ? (score.overallScore === null ? "withheld: not enough observed evidence (do not estimate one)" : String(score.overallScore)) : "not calculated"}`, `--- APPROVED SOURCES (validated automatically for this business, or approved by the operator; the only citable sources) ---\n${sources}`, ...(comp && !["profile", "audit"].includes(upTo) ? [`--- APPROVED COMPETITOR SOURCES (validated automatically or approved by the operator; other businesses, never attribute their facts to this business) ---\n${comp}`] : []), ...(visual ? [`--- VISUAL OBSERVATIONS FROM IMAGES JUDGED TO BE THIS BUSINESS'S (AI readings: unverified hypotheses, never verified facts and never citable as evidence; do not assume any image may be reused in published marketing) ---\n${visual}`] : []), ...(prior ? [`--- PRIOR STAGES ---\n${prior}`] : []), `--- LIMITATIONS SO FAR ---\n${d.limitations.join("; ") || "none recorded"}`].join("\n\n") + unavailable;
+  return [`--- BUSINESS RECORD ---\n${record}`, `--- OBSERVED EVIDENCE (collected by Atlas) ---\n${observed}`, `--- IDENTITY AND INSPECTION LEDGER ---\n${evidenceLedger(b, d)}`, `--- OPPORTUNITY SCORE ---\n${score ? (score.overallScore === null ? "withheld: not enough observed evidence (do not estimate one)" : String(score.overallScore)) : "not calculated"}`, `--- APPROVED SOURCES (validated automatically for this business, or approved by the operator; the only citable sources) ---\n${sources}`, ...(comp && !["profile", "audit"].includes(upTo) ? [`--- APPROVED COMPETITOR SOURCES (validated automatically or approved by the operator; other businesses, never attribute their facts to this business) ---\n${comp}`] : []), ...(visual ? [`--- VISUAL OBSERVATIONS FROM IMAGES JUDGED TO BE THIS BUSINESS'S (AI readings: unverified hypotheses, never verified facts and never citable as evidence; do not assume any image may be reused in published marketing) ---\n${visual}`] : []), ...(prior ? [`--- PRIOR STAGES ---\n${prior}`] : []), `--- LIMITATIONS SO FAR ---\n${d.limitations.join("; ") || "none recorded"}`].join("\n\n") + unavailable;
 }
 
 /** Read-only context handed to approved non-stage missions: the same approved-source evidence the dossier stages use. */
@@ -378,7 +417,7 @@ export class DossierEngine {
     const nextId = () => `S${Math.max(0, ...x.sources.map((u) => Number(u.id.slice(1)) || 0)) + 1}`;
     const addSource = (r: { url: string; title?: string; snippet?: string }, query: string, origin: SourceRef["origin"]) => {
       const key = normalizeUrl(r.url);
-      if (!r.url || byKey.has(key) || x.sources.length >= 18) return;
+      if (!r.url || byKey.has(key) || x.sources.length >= 26) return;
       const kind = classifySource(r.url, b.website);
       const rel = scoreRelevance(facts, { url: r.url, title: r.title, snippet: r.snippet });
       const src: SourceRef = { id: nextId(), url: clip(r.url, 400), title: clip(r.title, 200) || clip(r.url, 100), snippet: clip(r.snippet, 500), query, retrievedAt: this.now(), confidence: "unverified", kind, relevance: rel.relevance, reasons: rel.reasons, decision: rel.relevance === "unrelated" ? "rejected" : "pending", official: kind === "official_site" && rel.relevance === "match", origin, check: { status: "not_checked" } };
@@ -395,28 +434,50 @@ export class DossierEngine {
     // Read the candidate pages (bounded) so relevance is judged on real page text and claims can later be checked against it.
     let pagesRead = 0; const unreadable = new Map<string, number>();
     const images = (x.images ??= []);
+    const insp = (x.inspection ??= { social: [], conflicts: [] });
+    const LINKED = "linked from the official website";
+    const ingest = (src: SourceRef, doc: FetchedDoc) => {
+      if (!doc.ok || !doc.body) {
+        src.check = { status: "failed", at: this.now(), reason: doc.reason ?? "unreadable" }; unreadable.set(doc.reason ?? "unreadable", (unreadable.get(doc.reason ?? "unreadable") ?? 0) + 1);
+        if (src.kind === "social") insp.social = [...insp.social.filter((o) => o.url !== src.url), parseSocialProfile({ url: src.url, fetched: false, failReason: doc.reason ?? "unreadable", at: this.now() })];
+        return;
+      }
+      const bodyText = htmlToText(doc.body);
+      const meta = htmlMeta(doc.body);
+      const loginWall = src.kind === "social" && (bodyText.length < 400 || /\b(log ?in|sign ?up|create new account|join facebook)\b/i.test(bodyText.slice(0, 600)));
+      if (src.kind === "social") insp.social = [...insp.social.filter((o) => o.url !== src.url), parseSocialProfile({ url: src.url, fetched: true, loginWall, title: htmlTitle(doc.body), metaText: meta, bodyText, at: this.now() })];
+      if (loginWall && !meta) { src.check = { status: "failed", at: this.now(), reason: "login_wall: the profile is not readable without logging in" }; unreadable.set("login_wall", (unreadable.get("login_wall") ?? 0) + 1); return; }
+      pagesRead++;
+      if (loginWall) { src.pageText = clip(meta, 1500); src.confidence = "checked"; src.check = { status: "fetched", at: this.now(), reason: "meta_only: only the public description tags were readable (the profile itself is behind a login)" }; }
+      else { src.pageText = clip(bodyText, 6000); src.confidence = "checked"; src.check = { status: "fetched", at: this.now() }; }
+      const title = htmlTitle(doc.body); if (title && !src.title.trim()) src.title = title;
+      const rel = scoreRelevance(facts, { url: src.url, title: src.title, snippet: src.snippet, pageText: src.pageText });
+      src.relevance = rel.relevance; src.reasons = rel.reasons;
+      if (src.origin === "website" && src.kind === "social") { src.relevance = "match"; src.reasons = [...rel.reasons, LINKED]; }
+      if (src.relevance === "unrelated" && src.decision === "pending") src.decision = "rejected";
+      src.official = src.official || (src.kind === "official_site" && src.relevance === "match");
+      if (src.relevance !== "unrelated") for (const img of extractImages(doc.body, doc.finalUrl ?? src.url)) {
+        if (images.length >= IMAGE_CAP || images.some((i) => normalizeUrl(i.url) === normalizeUrl(img.url))) continue;
+        images.push({ id: `I${images.length + 1}`, url: img.url, pageUrl: src.url, sourceId: src.id, role: img.role, decision: "pending", rights: { ...DEFAULT_IMAGE_RIGHTS } } satisfies ImageRef);
+      }
+    };
     if (this.d.fetchDoc) {
-      for (const src of x.sources.filter((u) => u.relevance !== "unrelated" && u.check?.status !== "fetched").slice(0, 8)) {
-        const doc = await this.d.fetchDoc(src.url);
-        if (!doc.ok || !doc.body) { src.check = { status: "failed", at: this.now(), reason: doc.reason ?? "unreadable" }; unreadable.set(doc.reason ?? "unreadable", (unreadable.get(doc.reason ?? "unreadable") ?? 0) + 1); continue; }
-        const bodyText = htmlToText(doc.body);
-        const meta = htmlMeta(doc.body);
-        const loginWall = src.kind === "social" && (bodyText.length < 400 || /\b(log ?in|sign ?up|create new account|join facebook)\b/i.test(bodyText.slice(0, 600)));
-        if (loginWall && !meta) { src.check = { status: "failed", at: this.now(), reason: "login_wall: the profile is not readable without logging in" }; unreadable.set("login_wall", (unreadable.get("login_wall") ?? 0) + 1); continue; }
-        pagesRead++;
-        if (loginWall) { src.pageText = clip(meta, 1500); src.confidence = "checked"; src.check = { status: "fetched", at: this.now(), reason: "meta_only: only the public description tags were readable (the profile itself is behind a login)" }; }
-        else { src.pageText = clip(bodyText, 6000); src.confidence = "checked"; src.check = { status: "fetched", at: this.now() }; }
-        const title = htmlTitle(doc.body); if (title && !src.title.trim()) src.title = title;
-        const rel = scoreRelevance(facts, { url: src.url, title: src.title, snippet: src.snippet, pageText: src.pageText });
-        src.relevance = rel.relevance; src.reasons = rel.reasons;
-        if (rel.relevance === "unrelated" && src.decision === "pending") src.decision = "rejected";
-        src.official = src.official || (src.kind === "official_site" && rel.relevance === "match");
-        if (rel.relevance !== "unrelated") for (const img of extractImages(doc.body, doc.finalUrl ?? src.url)) {
-          if (images.length >= IMAGE_CAP || images.some((i) => normalizeUrl(i.url) === normalizeUrl(img.url))) continue;
-          images.push({ id: `I${images.length + 1}`, url: img.url, pageUrl: src.url, sourceId: src.id, role: img.role, decision: "pending", rights: { ...DEFAULT_IMAGE_RIGHTS } } satisfies ImageRef);
+      // Deep website inspection: the homepage plus internal pages that the site itself links to (About, Services, Contact...), recorded page by page.
+      if (b.website) {
+        insp.website = await inspectWebsite(b.website, this.d.fetchDoc, () => this.now(), (page, doc) => {
+          addSource({ url: page.url, title: page.title || `${name} — ${page.role} page`, snippet: page.description }, "website inspection", page.role === "home" ? "record" : "website");
+          const src = byKey.get(normalizeUrl(page.url)); if (src && src.check?.status !== "fetched") ingest(src, doc);
+        });
+        // Social profiles the official site links to are strong identity evidence; they are read like any other profile.
+        for (const link of insp.website.socialLinks.slice(0, 4)) {
+          addSource({ url: link, title: `${name} — profile linked from the official website` }, "linked from website", "website");
+          const ls = byKey.get(normalizeUrl(link)); if (ls && !(ls.reasons ?? []).includes(LINKED)) { ls.relevance = "match"; ls.reasons = [...(ls.reasons ?? []), LINKED]; ls.decision = "pending"; }
         }
       }
+      for (const src of x.sources.filter((u) => u.relevance !== "unrelated" && u.check?.status !== "fetched").slice(0, 8)) ingest(src, await this.d.fetchDoc(src.url));
     }
+    // Supplied profiles that could not be reached at all are still recorded, never silently dropped.
+    for (const link of b.socialLinks ?? []) if (!insp.social.some((o) => o.url === link)) insp.social.push(parseSocialProfile({ url: link, fetched: false, failReason: this.d.fetchDoc ? "not_read" : undefined, at: this.now() }));
     // ---- automatic validation: replaces the blocking operator approval. Operator decisions are never overwritten.
     for (const src of x.sources.filter((u) => u.role !== "competitor" && u.decidedBy !== "operator" && u.decision !== "approved")) {
       const v = decideBusinessSource(facts, src);
@@ -425,6 +486,14 @@ export class DossierEngine {
       if (v.decision !== "approved") src.official = false;
     }
     for (const src of x.sources.filter((u) => u.role !== "competitor" && u.decision === "approved" && !u.decidedBy)) { src.decidedBy = "auto"; src.decisionReason ??= "validated automatically"; }
+    // Contradictory claims: contact details on another source that clash with the official site are a conflict, not corroboration.
+    insp.conflicts = [];
+    if (insp.website && (insp.website.contacts.phones.length || insp.website.contacts.emails.length)) {
+      for (const c of findContactConflicts(insp.website.contacts, x.sources.filter((u) => u.role !== "competitor" && u.decision === "approved"))) {
+        const src = x.sources.find((u) => u.id === c.sourceId)!; src.decision = "pending"; src.decidedBy = "auto"; src.decisionReason = `conflicting details: ${c.detail}; not used until the operator confirms it is this business`;
+        insp.conflicts.push(`${c.sourceId}: ${c.detail}`);
+      }
+    }
     const count = (r: string) => x.sources.filter((u) => u.relevance === r).length;
     const mine = x.sources.filter((u) => u.role !== "competitor");
     const approvedNow = mine.filter((u) => u.decision === "approved");
@@ -441,10 +510,26 @@ export class DossierEngine {
       const full = socialApproved.filter((u) => evidenceLevel(u) === "full_page").length, metaOnly = socialApproved.filter((u) => evidenceLevel(u) === "meta_only").length;
       note(`This business has no website on record. ${socialApproved.length} social profile(s) were identified; ${full} readable in full, ${metaOnly} only through public description tags, ${socialApproved.length - full - metaOnly} not readable (social platforms usually require login). Post history, engagement and follower figures were NOT collected; findings about its social presence rest on what is listed here.`);
     } else if (!b.website && !approvedNow.length) note("This business has no website on record and no social profile could be identified from public search.");
+    for (const l of insp.website?.limits ?? []) note(l);
+    for (const u of mine.filter((m) => m.decisionReason?.startsWith("look-alike domain"))) note(`A page on a look-alike domain (${u.url}) was found but not used: it resembles the recorded website without being it. Only the recorded website's own content is treated as the business's site.`);
+    for (const c of insp.conflicts) note(`Conflicting contact details between the official site and another source (${c}); the other source is not used until you confirm it.`);
+    const unread = insp.social.filter((o) => o.access === "login_wall" || o.access === "unreachable" || o.access === "not_checked");
+    if (unread.length) note(`${unread.length} social profile(s) could not be read (${unread.map((o) => `${o.platform}: ${o.access.replace("_", " ")}`).join(", ")}). Their content, activity and engagement are UNKNOWN; this does not show the accounts are inactive or absent.`);
+    // Research quality is judged on evidence actually gathered, not on whether later stages will produce valid JSON.
+    const readPages = (insp.website?.pages ?? []).filter((p) => p.status === "read").length;
+    const fullRead = approvedNow.filter((u) => evidenceLevel(u) === "full_page").length;
+    const socialSeen = insp.social.filter((o) => o.access === "full_page" || o.access === "meta_only").length;
+    const reasonsQ: string[] = [];
+    if (b.website) reasonsQ.push(readPages ? `${readPages} website page(s) read` : "the website could not be read"); else reasonsQ.push("no website on record");
+    reasonsQ.push(socialSeen ? `${socialSeen} social profile(s) partly or fully readable` : insp.social.length ? "no social profile was readable" : "no social profile identified");
+    reasonsQ.push(`${approvedNow.length} source(s) validated, ${fullRead} read in full`);
+    insp.quality = { level: !approvedNow.length || (!fullRead && !socialSeen) ? "insufficient" : fullRead >= 2 || (fullRead >= 1 && socialSeen >= 1) ? "sufficient" : "thin", reasons: reasonsQ, assessedAt: this.now() };
+    if (insp.quality.level !== "sufficient") note(`Research evidence is ${insp.quality.level}: ${reasonsQ.join("; ")}. Findings are limited to what this evidence supports.`);
     const ambiguity = detectIdentityAmbiguity(facts, mine);
     st.output = { queries, searchStatus: status, ...(error ? { error } : {}), candidates: x.sources.length, matched: count("match"), possible: count("possible"), unrelated: count("unrelated"), pagesRead, imageCandidates: images.length, imageSummary: imageSummary(x), observedEvidenceItems: observed,
       validation: { autoApproved: mine.filter((u) => u.decidedBy === "auto" && u.decision === "approved").length, autoRejected: mine.filter((u) => u.decidedBy === "auto" && u.decision === "rejected").length, needsConfirmation: mine.filter((u) => u.decision === "pending").length },
       evidence: approvedNow.map((u) => ({ id: u.id, kind: u.kind ?? "other", level: evidenceLevel(u), chars: u.pageText?.length ?? 0, ...(u.check?.reason ? { limit: u.check.reason } : {}) })),
+      quality: insp.quality, website: insp.website ? { pagesInspected: readPages, pagesAttempted: insp.website.pages.length, redirectedToOtherDomain: insp.website.redirectedToOtherDomain ?? null } : null, social: insp.social.map((o) => ({ platform: o.platform, url: o.url, access: o.access })), conflicts: insp.conflicts,
       identity: ambiguity.ambiguous ? { status: "ambiguous", detail: ambiguity.detail } : { status: approvedNow.length ? "resolved" : "unconfirmed_no_sources" },
       guidance: ambiguity.ambiguous ? ambiguity.detail : approvedNow.length ? `${approvedNow.length} source(s) were validated automatically for internal use (${levels.filter((l) => l === "full_page").length} read in full). Research continues without waiting for you; you can still reject or add sources.` : "No source was validated, so research continues from the saved record only; add the official website or profile URLs to improve it." };
     if (ambiguity.ambiguous && x.sourceApproval?.status !== "approved") x.sourceApproval = { status: "awaiting", reason: "ambiguous_identity", ...(ambiguity.detail ? { detail: ambiguity.detail } : {}) };
@@ -722,7 +807,13 @@ export class DossierEngine {
 
   private evidenceCtx(x: Dossier): EvidenceCtx {
     const approved = x.sources.filter((u) => u.decision === "approved");
-    return { refs: new Set(approved.map((u) => u.id)), text: new Map(approved.filter((u) => u.pageText).map((u) => [u.id, u.pageText!])), official: new Set(approved.filter((u) => u.official).map((u) => normalizeUrl(u.url))) };
+    return { refs: new Set(approved.map((u) => u.id)), text: new Map(approved.filter((u) => u.pageText).map((u) => [u.id, u.pageText!])), official: new Set(approved.filter((u) => u.official).map((u) => normalizeUrl(u.url))), accounts: this.knownAccounts(x) };
+  }
+
+  /** Social accounts already known for this business: supplied by the operator, linked from the website, or found in sources. */
+  private knownAccounts(x: Dossier) {
+    const b = this.d.store.businesses.get(x.businessId);
+    return knownPlatforms([...(b?.socialLinks ?? []), ...(x.inspection?.website?.socialLinks ?? []), ...x.sources.filter((u) => u.kind === "social" && u.role !== "competitor" && u.decision !== "rejected").map((u) => u.url)]);
   }
 
   /** Routing hint for a recovery mission: the models that already answered this stage unusably. Read by the Workforce router. */
@@ -785,6 +876,7 @@ export class DossierEngine {
       st.output = parsed.output; st.generatedBy = out.generatedBy; st.status = "completed"; st.completedAt = this.now(); st.error = null;
       if (parsed.repairs.length) x.limitations.push(`${s.title}: the model's JSON needed mechanical repair (${parsed.repairs.join(", ")}); content was validated after repair.`);
       if (rec.attempts.length - round > 1) x.limitations.push(`${s.title}: needed ${rec.attempts.length - round} attempts to get usable output (${rec.attempts.slice(round, -1).map((a) => `${a.model ?? "unknown model"}: ${a.validationError}`).join("; ")}).`);
+      if (s.id === "profile") x.identity = { entityType: String(parsed.output.entityType ?? "unknown"), distinctFrom: (parsed.output.distinctFrom as string[]) ?? [] };
       if (s.id === "plan") await this.createFollowUps(b, x, parsed.output.followUps as Array<{ title: string; description: string; assignedAI: string; external: boolean }>);
       return;
     }

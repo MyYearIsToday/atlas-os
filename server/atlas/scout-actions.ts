@@ -65,6 +65,7 @@ export function summarizeDossier(d: Dossier | undefined, missions: Array<{ taskI
   return {
     status: d.status, updatedAt: d.updatedAt, manualRetries: d.manualRetries, sources: d.sources.length, sourceApproval: d.sourceApproval ?? null, sourcesApproved: d.sources.filter((s) => s.decision === "approved").length, sourcesPending: d.sources.filter((s) => (s.decision ?? "pending") === "pending").length, limitations: d.limitations,
     images: imageSummary(d),
+    researchQuality: d.inspection?.quality ?? null,
     stages: STAGES.map((s) => { const st = d.stages[s.id]; return { id: s.id, title: s.title, status: st.status, taskId: st.taskId, missionStatus: missions.find((m) => m.taskId === st.taskId)?.status ?? null, attempts: st.attempts, error: st.error, completedAt: st.completedAt, generatedBy: st.generatedBy, dependsOn: s.dependsOn, softDependsOn: s.softDependsOn ?? [], recovery: st.recovery ? { final: st.recovery.final, attempts: st.recovery.attempts } : null }; }),
     followUps: d.followUps.map((f) => ({ ...f, missionStatus: missions.find((m) => m.taskId === f.taskId)?.status ?? null })),
   };
@@ -99,7 +100,7 @@ export function readDossier(deps: PipelineDeps, businessId: string) {
   const d = deps.store.dossiers.get(businessId);
   if (!d) return null;
   const tasks = deps.missionQueue.getSnapshot();
-  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, evidenceLevel: evidenceLevel({ ...s, pageText } as typeof d.sources[number]), decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, competitorApproval: d.competitorApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
+  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, inspection: d.inspection ?? null, identity: d.identity ?? null, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, evidenceLevel: evidenceLevel({ ...s, pageText } as typeof d.sources[number]), decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, competitorApproval: d.competitorApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
 }
 
 // ---------------------------------------------------------------- start one business
