@@ -37,6 +37,7 @@ import { buildBusinessView } from "./atlas/business-view";
 import { ProcessController, buildCandidateView, readDossier, readMissionResult, startCandidate, type ActionContext } from "./atlas/scout-actions";
 import { DossierEngine, missionContext } from "./atlas/dossier";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
+import { handleSmcsRequest } from "./atlas/smcs-library";
 
 let scoutDiscoveryEnabled = false;
 /** What discovery has actually done since this server process started (enabled != running/finding businesses). */
@@ -350,6 +351,14 @@ export function createAiProxyServer(
       if (parsedUrl.pathname.startsWith("/api/workspace/")) {
         // Workspace records persist through the pipeline's PostgreSQL store; null persistence -> 503 (never RAM).
         const r = await handleWorkspaceRequest(method, parsedUrl.pathname, () => readJsonBody(req), { persistence: atlasPipeline?.persistence ?? workspacePersistence, secretConfigured: !!process.env.ATLAS_PROXY_SHARED_SECRET });
+        sendJson(res, r.status, r.body);
+        logRequest(method, parsedUrl.pathname, r.status, Date.now() - started);
+        return;
+      }
+
+      if (parsedUrl.pathname.startsWith("/api/smcs/")) {
+        // Private campaign-reference library. Same PostgreSQL documents and shared-secret gate as workspace. Not part of Scout.
+        const r = await handleSmcsRequest(method, parsedUrl.pathname, parsedUrl.searchParams, () => readJsonBody(req), { persistence: atlasPipeline?.persistence ?? workspacePersistence, secretConfigured: !!process.env.ATLAS_PROXY_SHARED_SECRET });
         sendJson(res, r.status, r.body);
         logRequest(method, parsedUrl.pathname, r.status, Date.now() - started);
         return;
