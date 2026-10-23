@@ -48,6 +48,32 @@ test("create validates required metadata, refuses performance figures, and defau
   assert.equal((await call(p, "POST", "/api/smcs/references", { record: record({ reviewStatus: "approved" }) })).status, 400);
 });
 
+test("sourced performance is kept exactly; bare or incomplete figures are rejected and nothing is invented", async () => {
+  const { p } = fakePersistence();
+  const bare = await call(p, "POST", "/api/smcs/references", { record: record({ impressions: 12000 }) });
+  assert.equal(bare.status, 400);
+  assert.match((bare.body as { error: { fields: Array<{ message: string }> } }).error.fields[0].message, /Performance figures/);
+  const incomplete = await call(p, "POST", "/api/smcs/references", { record: record({ performance: { reach: { value: 1000, source: "Meta case study" } } }) });
+  assert.equal(incomplete.status, 400);
+  assert.equal((incomplete.body as { error: { fields: Array<{ field: string }> } }).error.fields.some((f) => f.field === "performance.reach.verification"), true);
+  const created = await call(p, "POST", "/api/smcs/references", { record: record({ performance: {
+    impressions: { value: 48000, unit: "count", source: "Brand case study, 2024", sourceUrl: "https://brand.example/study", verification: "source_stated", asOf: "2024-06-01" },
+    roi: { value: 3.2, source: "Operator notes, not checked", verification: "unverified" },
+  } }) });
+  assert.equal(created.status, 201);
+  const item = (created.body as { item: CampaignReference }).item;
+  assert.equal(item.performance?.impressions?.value, 48000);
+  assert.equal(item.performance?.impressions?.verification, "source_stated");
+  assert.equal(item.performance?.impressions?.source, "Brand case study, 2024");
+  assert.equal(item.performance?.roi?.verification, "unverified");
+  assert.equal(item.performance?.reach, undefined);
+  assert.equal(item.performance?.engagement, undefined);
+  assert.equal(item.performance?.conversions, undefined);
+  const cleared = await call(p, "POST", "/api/smcs/references/update", { id: item.id, record: { performance: null }, expectedVersion: 1 });
+  assert.equal((cleared.body as { item: CampaignReference }).item.performance, undefined);
+  assert.equal((cleared.body as { item: CampaignReference }).item.version, 2);
+});
+
 test("likely duplicates are blocked until acknowledged; possible matches are reported", async () => {
   const { p } = fakePersistence();
   const first = (await call(p, "POST", "/api/smcs/references", { record: record() })).body as { item: CampaignReference };

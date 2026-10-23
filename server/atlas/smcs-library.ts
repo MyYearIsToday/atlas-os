@@ -2,8 +2,10 @@
  * SMCS campaign-reference library (phase 1).
  *
  * A private, curated catalogue of marketing campaigns Atlas may later learn from.
- * This module stores only what an operator supplies. It never researches campaigns,
- * never fills in missing facts, and never records performance figures.
+ * This module stores only what an operator supplies. It never researches campaigns
+ * and never fills in missing facts. A performance figure is stored only when the
+ * operator supplies the number, the source that stated it, and an explicit
+ * verification status. Missing figures stay absent. Nothing is guessed.
  *
  * Storage is the existing `atlas_documents` table (collection `smcs_campaign_reference`),
  * the same PostgreSQL handle as workspace records. No migration and no second database.
@@ -21,8 +23,31 @@ import type { AtlasPersistence } from "../../src/services/persistence/atlas-pers
 export const SMCS_COLLECTION = "smcs_campaign_reference" as const;
 export const REVIEW_STATUSES = ["candidate", "approved", "rejected"] as const;
 export const LICENSE_STATUSES = ["unknown", "attributed", "licensed", "restricted", "internal"] as const;
+export const PERFORMANCE_METRICS = ["reach", "impressions", "engagement", "conversions", "roi"] as const;
+export const METRIC_VERIFICATION = ["source_stated", "independently_checked", "unverified"] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
 export type LicenseStatus = (typeof LICENSE_STATUSES)[number];
+export type PerformanceMetric = (typeof PERFORMANCE_METRICS)[number];
+export type MetricVerification = (typeof METRIC_VERIFICATION)[number];
+
+/** One source-attributed result. Every field the caller omits stays omitted; verification is never assumed. */
+export interface AttributedResult {
+  value: number;
+  source: string;
+  verification: MetricVerification;
+  unit?: string;
+  sourceUrl?: string;
+  asOf?: string;
+  note?: string;
+}
+export interface CampaignPerformance {
+  reach?: AttributedResult;
+  impressions?: AttributedResult;
+  engagement?: AttributedResult;
+  conversions?: AttributedResult;
+  roi?: AttributedResult;
+  note?: string;
+}
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_DOC_CHARS = 100_000;
@@ -49,8 +74,8 @@ const LIMITS: Record<TextField, number> = {
   attribution: 500, retentionNotes: 1000, qualityNotes: 1000, reviewNote: 500, reviewedBy: 80, duplicateOf: 64,
 };
 
-/** Names that would store performance claims. Rejected outright so a missing figure cannot be invented later. */
-const FORBIDDEN_FIELDS = ["performance", "metrics", "results", "roi", "impressions", "reach", "conversions", "engagementRate", "spend", "revenue", "likes", "views", "ctr"] as const;
+/** Bare numbers are not results. A sourced figure belongs under `performance`, with verification. */
+const FORBIDDEN_FIELDS = ["metrics", "results", "roi", "impressions", "reach", "engagement", "conversions", "engagementRate", "spend", "revenue", "likes", "views", "ctr"] as const;
 
 export interface FieldError { field: string; message: string }
 
@@ -99,6 +124,8 @@ export interface CampaignReference {
   qualityNotes?: string;
   duplicateOf?: string;
   duplicateIndicators: string[];
+  /** Present only when the operator supplied at least one sourced result. Never a placeholder. */
+  performance?: CampaignPerformance;
   createdAt: string;
   updatedAt: string;
 }
@@ -171,10 +198,86 @@ function readTags(input: Record<string, unknown>, errors: FieldError[]): string[
 
 function rejectForbidden(input: Record<string, unknown>, errors: FieldError[]) {
   for (const field of FORBIDDEN_FIELDS) {
-    if (input[field] !== undefined && input[field] !== null && input[field] !== "") {
-      errors.push({ field, message: "Performance figures are not stored. Leave them out rather than guessing." });
-    }
+    if (input[field] === undefined || input[field] === null || input[field] === "") continue;
+    const structured = (PERFORMANCE_METRICS as readonly string[]).includes(field);
+    errors.push({
+      field,
+      message: structured
+        ? `Performance figures cannot be a bare ${field}. Put it under performance.${field} with value, source and verification, or leave it out.`
+        : "Performance figures without a named source are not stored. Leave them out rather than guessing.",
+    });
   }
+}
+
+function readShort(raw: unknown, field: string, max: number, errors: FieldError[], required = false): string | undefined {
+  if (raw === undefined || raw === null || raw === "") {
+    if (required) errors.push({ field, message: `${field} is required` });
+    return undefined;
+  }
+  if (typeof raw !== "string") { errors.push({ field, message: `${field} must be text` }); return undefined; }
+  const value = raw.replace(/\s+/g, " ").trim();
+  if (!value) { if (required) errors.push({ field, message: `${field} is required` }); return undefined; }
+  if (value.length > max) errors.push({ field, message: `${field} must be at most ${max} characters` });
+  return value || undefined;
+}
+
+/** A metric is stored only with an explicit number, source and verification. No field is defaulted. */
+function readMetric(name: PerformanceMetric, raw: unknown, errors: FieldError[]): AttributedResult | undefined {
+  if (raw === null) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    errors.push({ field: `performance.${name}`, message: `${name} must be an object with value, source and verification` });
+    return undefined;
+  }
+  const src = raw as Record<string, unknown>;
+  const metric: AttributedResult = { value: Number.NaN, source: "", verification: "unverified" };
+  let ok = true;
+  if (typeof src.value !== "number" || !Number.isFinite(src.value)) {
+    errors.push({ field: `performance.${name}.value`, message: "value must be a finite number supplied by the source, not text or a guess" });
+    ok = false;
+  } else metric.value = src.value;
+  const source = readShort(src.source, `performance.${name}.source`, 300, errors, true);
+  if (source) metric.source = source; else ok = false;
+  if (!(METRIC_VERIFICATION as readonly string[]).includes(String(src.verification ?? ""))) {
+    errors.push({ field: `performance.${name}.verification`, message: "verification must be source_stated, independently_checked or unverified" });
+    ok = false;
+  } else metric.verification = src.verification as MetricVerification;
+  const unit = readShort(src.unit, `performance.${name}.unit`, 40, errors);
+  if (unit) metric.unit = unit;
+  if ("sourceUrl" in src && src.sourceUrl != null && src.sourceUrl !== "") {
+    const sourceUrl = readShort(src.sourceUrl, `performance.${name}.sourceUrl`, 500, errors);
+    if (sourceUrl && !websiteKey(sourceUrl)) errors.push({ field: `performance.${name}.sourceUrl`, message: "sourceUrl must be an http(s) URL" });
+    else if (sourceUrl) metric.sourceUrl = sourceUrl;
+  }
+  if ("asOf" in src && src.asOf != null && src.asOf !== "") {
+    const asOf = readShort(src.asOf, `performance.${name}.asOf`, 10, errors);
+    if (asOf && !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) errors.push({ field: `performance.${name}.asOf`, message: "asOf must be YYYY-MM-DD" });
+    else if (asOf) metric.asOf = asOf;
+  }
+  const note = readShort(src.note, `performance.${name}.note`, 500, errors);
+  if (note) metric.note = note;
+  return ok ? metric : undefined;
+}
+
+function readPerformance(input: Record<string, unknown>, errors: FieldError[]): CampaignPerformance | null | undefined {
+  if (!("performance" in input)) return undefined;
+  if (input.performance === null) return null;
+  if (!input.performance || typeof input.performance !== "object" || Array.isArray(input.performance)) {
+    errors.push({ field: "performance", message: "performance must be an object of sourced metrics, or omitted" });
+    return undefined;
+  }
+  const src = input.performance as Record<string, unknown>;
+  const known = new Set<string>([...PERFORMANCE_METRICS, "note"]);
+  for (const key of Object.keys(src)) if (!known.has(key)) errors.push({ field: `performance.${key}`, message: "unknown performance field" });
+  const performance: CampaignPerformance = {};
+  for (const name of PERFORMANCE_METRICS) {
+    if (!(name in src) || src[name] == null) continue;
+    const metric = readMetric(name, src[name], errors);
+    if (metric) performance[name] = metric;
+  }
+  const note = readShort(src.note, "performance.note", 500, errors);
+  if (note) performance.note = note;
+  if (!PERFORMANCE_METRICS.some((name) => performance[name]) && !performance.note) return null;
+  return performance;
 }
 
 export interface ParsedReference {
@@ -183,6 +286,8 @@ export interface ParsedReference {
   reviewStatus?: ReviewStatus;
   licenseStatus?: LicenseStatus;
   duplicateIndicators?: string[];
+  /** undefined: not in the payload. null: clear stored results. */
+  performance?: CampaignPerformance | null;
 }
 
 /** Validates operator input. Missing optional facts stay absent. Nothing is inferred. */
@@ -215,13 +320,14 @@ export function parseReference(input: unknown, opts: { requireTitle?: boolean } 
     else licenseStatus = src.licenseStatus as LicenseStatus;
   }
   const tags = "tags" in src ? readTags(src, errors) : [];
+  const performance = readPerformance(src, errors);
   let duplicateIndicators: string[] | undefined;
   if ("duplicateIndicators" in src) {
     if (!Array.isArray(src.duplicateIndicators) || src.duplicateIndicators.some((v) => typeof v !== "string")) errors.push({ field: "duplicateIndicators", message: "duplicateIndicators must be a list of reasons" });
     else duplicateIndicators = src.duplicateIndicators.map((v) => clip(v, 80)).filter(Boolean).slice(0, 8);
   }
   if (errors.length) throw new SmcsInputError("Campaign reference is not valid", errors);
-  return { fields, tags: "tags" in src ? tags : [], reviewStatus, licenseStatus, duplicateIndicators };
+  return { fields, tags: "tags" in src ? tags : [], reviewStatus, licenseStatus, duplicateIndicators, performance };
 }
 
 export function assessDuplicates(candidate: Pick<CampaignReference, "title" | "brand" | "sourceUrl">, existing: CampaignReference[], ignoreId?: string): DuplicateMatch[] {
@@ -300,6 +406,7 @@ export class SmcsLibrary {
       licenseStatus: parsed.licenseStatus ?? "unknown",
       reviewStatus: "candidate",
       tags: parsed.tags,
+      ...(parsed.performance ? { performance: parsed.performance } : {}),
       duplicateOf: top?.level === "likely" ? top.id : parsed.fields.duplicateOf,
       duplicateIndicators: top ? top.reasons : [],
       createdAt: stamp,
@@ -325,6 +432,10 @@ export class SmcsLibrary {
     }
     if (!next.title) throw new SmcsInputError("Campaign reference is not valid", [{ field: "title", message: "title is required" }]);
     if (parsed.licenseStatus) next.licenseStatus = parsed.licenseStatus;
+    if ("performance" in patchObj) {
+      if (parsed.performance) next.performance = parsed.performance;
+      else delete next.performance;
+    }
     const duplicates = assessDuplicates(next, await this.all(), id);
     if (duplicates.some((d) => d.level === "likely") && !acknowledgeDuplicate) throw new SmcsConflictError("This looks like a campaign already in the library. Resend with acknowledgeDuplicate to keep both.", duplicates);
     const top = duplicates.find((d) => d.level === "likely");
