@@ -54,14 +54,16 @@ export function pickInternalPages(links: Array<{ url: string; text: string }>, b
   return [...picked, ...rest].slice(0, max);
 }
 
+/** Malformed percent-encoding is not fatal: the value is dropped (empty) rather than guessed at. */
+const safeDecode = (v: string) => { try { return decodeURIComponent(v); } catch { return ""; } };
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const PHONE = /(?:\+?233|0)[\s().-]?\d{2}[\s().-]?\d{3}[\s().-]?\d{4}/g;
 const uniq = (a: string[]) => [...new Set(a)];
 
 export function extractContacts(html: string, text: string): { emails: string[]; phones: string[] } {
-  const mail = [...html.matchAll(/mailto:([^"'?\s>]+)/gi)].map((m) => decodeURIComponent(m[1]).toLowerCase());
-  const tel = [...html.matchAll(/tel:([^"'\s>]+)/gi)].map((m) => decodeURIComponent(m[1]).replace(/[^\d+]/g, ""));
-  const emails = uniq([...mail, ...(text.match(EMAIL) ?? []).map((e) => e.toLowerCase())]).filter((e) => !/\.(png|jpe?g|gif|webp|svg)$/.test(e) && !/(example|sentry|wixpress|domain)\./.test(e)).slice(0, 6);
+  const mail = [...html.matchAll(/mailto:([^"'?\s>]+)/gi)].map((m) => safeDecode(m[1]).toLowerCase());
+  const tel = [...html.matchAll(/tel:([^"'\s>]+)/gi)].map((m) => safeDecode(m[1]).replace(/[^\d+]/g, ""));
+  const emails = uniq([...mail, ...(text.match(EMAIL) ?? []).map((e) => e.toLowerCase())]).filter((e) => /^[^\s@<>]+@[^\s@<>]+\.[a-z]{2,}$/i.test(e)).filter((e) => !/\.(png|jpe?g|gif|webp|svg)$/.test(e) && !/(example|sentry|wixpress|domain)\./.test(e)).slice(0, 6);
   const phones = uniq([...tel, ...(text.match(PHONE) ?? []).map((p) => p.replace(/[^\d+]/g, ""))]).filter((p) => p.replace(/\D/g, "").length >= 9).slice(0, 6);
   return { emails, phones };
 }

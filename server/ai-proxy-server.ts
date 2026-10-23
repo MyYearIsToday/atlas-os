@@ -36,7 +36,7 @@ import { MultimodalIntelligenceService } from "../src/services/multimodal-intell
 import { buildBusinessView } from "./atlas/business-view";
 import { ProcessController, buildCandidateView, readDossier, readMissionResult, startCandidate, type ActionContext } from "./atlas/scout-actions";
 import { DossierEngine, missionContext } from "./atlas/dossier";
-import { ChatService, type ChatModel } from "./atlas/chat";
+import { ChatService, parseProposalRequest, type ChatModel } from "./atlas/chat";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 
 let scoutDiscoveryEnabled = false;
@@ -402,8 +402,9 @@ export function createAiProxyServer(
           } else if (method === "POST" && !chatMatch[2]) {
             ({ status, body: payload } = await chatService.ask(chatMatch[1], ((await readJsonBody(req)) as { message?: unknown } | null)?.message));
           } else if (method === "POST" && chatMatch[2]) {
-            const b = ((await readJsonBody(req)) ?? {}) as { messageId?: unknown; proposalId?: unknown; decision?: unknown };
-            ({ status, body: payload } = await chatService.decideProposal(chatMatch[1], String(b.messageId ?? ""), String(b.proposalId ?? ""), b.decision === "decline" ? "decline" : "accept"));
+            const pr = parseProposalRequest(await readJsonBody(req));
+            if (!pr.ok) { status = 400; payload = { ok: false, error: "invalid_decision", message: pr.message }; }
+            else ({ status, body: payload } = await chatService.decideProposal(chatMatch[1], pr.messageId, pr.proposalId, pr.decision));
           } else { status = 405; payload = { error: { code: "method_not_allowed", message: "unsupported method" } }; }
         } else if (method === "GET" && url === "/api/scout/candidates") {
           payload = { durable: !!atlasPipeline.persistence, discovery: scoutDiscoveryStatus, items: buildCandidateView({ discovered: scoutPipeline.repository.list(), pipeline: { deps: atlasPipeline.deps, autonomy: atlasPipeline.autonomy } }) };

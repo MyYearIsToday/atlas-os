@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DossierEngine, parseStageOutput, STAGES } from "./dossier";
+import { isOwnSiteHost, DossierEngine, parseStageOutput, STAGES } from "./dossier";
 import { createPipelineDeps } from "../../src/orchestrator/atlas-pipeline";
 
 const biz = (id = "b1") => ({ id, canonicalName: "Mesa UGBS", category: "education", address: "University of Ghana, Legon", sourceReferences: ["manual"] }) as never;
@@ -706,5 +706,64 @@ test("research quality is judged on gathered evidence: nothing read means 'insuf
   const c = setup({ searchFn: async () => [] });
   const d = await discover(c, withSite({ website: undefined }));
   assert.equal(d.inspection!.quality!.level, "insufficient");
-  assert.ok(d.limitations.some((l) => /evidence is insufficient/.test(l)));
+  assert.ok(d.limitations.some((l) => /evidence rating is insufficient/.test(l)));
+});
+
+// ---------------------------------------------------------------- review fixes: own-site host check, redirects, malformed encodings
+
+test("isOwnSiteHost compares parsed hostnames: an unrelated or look-alike HTTPS domain never passes", () => {
+  const own = "https://www.mesa.example/home";
+  for (const ok of ["https://mesa.example/x", "http://www.mesa.example", "https://blog.mesa.example/p", "https://MESA.example:8443/a?b=1"]) assert.equal(isOwnSiteHost(own, ok), true, ok);
+  for (const bad of ["https://attacker.example/steal", "https://mesa.example.evil.com/", "https://evilmesa.example/", "https://mesa-example.com/", "https://mesa.example@evil.com/", "https://user:pw@mesa.example/", "ftp://mesa.example/", "javascript:alert(1)", "https://evil.com/https://mesa.example/", "https://evil.com/?u=mesa.example", "not a url", ""]) assert.equal(isOwnSiteHost(own, bad), false, bad);
+  assert.equal(isOwnSiteHost(undefined, "https://mesa.example"), false); assert.equal(isOwnSiteHost("", "https://mesa.example"), false);
+  assert.equal(isOwnSiteHost("localhost", "https://localhost"), false, "a host without a dot is never an own-site match");
+});
+
+test("chat evidence retrieval fetches only the business's own site or trusted addresses: unrelated, look-alike, rejected and pending pages are never fetched", async () => {
+  const fetched: string[] = [];
+  const fetchFn = (u: string) => { fetched.push(u); return { ok: true, body: page("x", `<p>Mesa UGBS page ${FILL}</p>`), finalUrl: u }; };
+  const c = setup({ searchFn: async () => [], fetchFn });
+  const b = withSite({ website: "https://mesa.example" });
+  const d = await discover(c, b);
+  d.sources.push({ id: "S90", url: "https://rejected.example/r", title: "r", snippet: "", query: "q", retrievedAt: "t", confidence: "unverified", decision: "rejected", check: { status: "not_checked" } } as never, { id: "S91", url: "https://pending.example/p", title: "p", snippet: "", query: "q", retrievedAt: "t", confidence: "unverified", decision: "pending", check: { status: "not_checked" } } as never);
+  fetched.length = 0;
+  for (const urls of [["https://attacker.example/steal", "https://mesa.example.evil.com/x"], ["https://rejected.example/r", "https://pending.example/p"]]) {
+    const r = await c.engine.addEvidence("b1", { urls });
+    assert.equal(r.added.length, 0); assert.equal(r.notes.length, 2); assert.ok(r.notes.every((n) => /not fetched/.test(n)));
+  }
+  assert.deepEqual(fetched, [], "no outside page was fetched");
+  const own = await c.engine.addEvidence("b1", { urls: ["https://blog.mesa.example/news"] });
+  assert.deepEqual(fetched, ["https://blog.mesa.example/news"]); assert.equal(own.added[0].read, true);
+});
+
+test("a recorded website that redirects to another domain is not treated as official: it is held back and the redirected content is judged on its own evidence", async () => {
+  const redirect = (u: string) => (u.startsWith("https://mesa.example") ? { ok: true, body: page("Mesa UGBS", `<p>Mesa UGBS, Legon. Call 0244123456. ${FILL}</p>`), finalUrl: "https://mesa-clone.example/" } : { ok: false, reason: "http_404" });
+  const c = setup({ searchFn: async () => [], fetchFn: redirect });
+  const d = await discover(c, withSite({ website: "https://mesa.example" }));
+  assert.equal(d.inspection!.website!.redirectedToOtherDomain, "mesa-clone.example");
+  const rec = d.sources.find((s) => s.url.startsWith("https://mesa.example"))!;
+  assert.equal(rec.official, false); assert.equal(rec.decision, "pending"); assert.match(rec.decisionReason ?? "", /redirects to mesa-clone\.example/);
+  const moved = d.sources.find((s) => s.url.startsWith("https://mesa-clone.example"))!;
+  assert.ok(moved, "the redirected page is kept as an ordinary candidate"); assert.equal(moved.official, false);
+  assert.ok(!d.sources.some((s) => s.official), "nothing is official when the recorded site redirected away");
+  assert.equal(d.inspection!.conflicts.length, 0, "redirected contact details are not used as the official site's");
+  assert.ok(d.limitations.some((l) => /redirects to a different domain/.test(l)));
+  assert.match(c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_profile")!.description, /redirects to mesa-clone\.example/);
+});
+
+test("a same-site redirect (http to https, www) stays official; malformed mailto/tel percent-encoding does not abort inspection", async () => {
+  const fetchFn = (u: string) => (u.startsWith("https://mesa.example") ? { ok: true, body: page("Mesa UGBS", `<a href="mailto:%E0%A4%A@x.com">bad</a><a href="tel:%zz0244123456">bad</a><a href="mailto:info@mesa.example">ok</a><p>Mesa UGBS Legon. ${FILL}</p>`), finalUrl: "https://www.mesa.example/" } : { ok: false, reason: "http_404" });
+  const c = setup({ searchFn: async () => [], fetchFn });
+  const d = await discover(c, withSite({ website: "https://mesa.example" }));
+  assert.equal(d.stages.research.status, "completed"); assert.equal(d.inspection!.website!.redirectedToOtherDomain, undefined);
+  assert.ok(d.sources.some((s) => s.official && s.decision === "approved"));
+  assert.ok(d.inspection!.website!.contacts.emails.includes("info@mesa.example"));
+  assert.ok(d.inspection!.website!.contacts.emails.every((e) => !e.includes("%")), "malformed encoded addresses are dropped, not stored");
+});
+
+test("the evidence rating is described as a count-based heuristic", async () => {
+  const c = setup({ searchFn: async () => [] });
+  const d = await discover(c, withSite({ website: undefined }));
+  assert.ok(d.limitations.some((l) => /count-based heuristic/.test(l) && /does not judge how good/.test(l)));
+  assert.match(c.deps.missionQueue.getSnapshot().find((t) => t.missionType === "dossier_profile")!.description, /count-based heuristic, not a quality judgement/);
 });

@@ -6,7 +6,7 @@ import { DEFAULT_IMAGE_RIGHTS, type Dossier, type FollowUpRef, type ImageAssessm
 import { recoverJsonObject, validateShape } from "./json-recovery";
 import { decideBusinessSource, decideCompetitorSource, detectIdentityAmbiguity, evidenceLevel, findContactConflicts, industryTokens } from "./source-validation";
 import { buildAssociationPrompt, decideImage, parseAssociation, sniffImage, type BusinessIdentity } from "./image-association";
-import { classifySource, extractImages, htmlMeta, htmlTitle, htmlToText, normalizeUrl, quoteSupported, scoreRelevance, type FetchDoc, type FetchedDoc } from "./source-tools";
+import { classifySource, extractImages, hostOf, htmlMeta, htmlTitle, htmlToText, normalizeUrl, quoteSupported, scoreRelevance, type FetchDoc, type FetchedDoc } from "./source-tools";
 import { inspectWebsite } from "./site-inspection";
 import { contradictsKnownAccount, knownPlatforms, parseSocialProfile, socialContextBlock } from "./social-intel";
 import type { SocialPlatform } from "../../src/services/scout/social-profiles";
@@ -246,8 +246,20 @@ export function evidenceLedger(b: BusinessIntelligence, d: Dossier): string {
   else lines.push("No website is on record. Not having one recorded does not prove the business has none.");
   lines.push(socialContextBlock(i?.social ?? [], knownPlatforms([...(b.socialLinks ?? []), ...(w?.socialLinks ?? []), ...d.sources.filter((u) => u.kind === "social" && u.role !== "competitor" && u.decision !== "rejected").map((u) => u.url)])));
   if (i?.conflicts.length) lines.push(`CONFLICTS (not resolved): ${i.conflicts.join("; ")}`);
-  if (i?.quality) lines.push(`Research evidence quality: ${i.quality.level} (${i.quality.reasons.join("; ")})`);
+  if (i?.quality) lines.push(`Research evidence rating (count-based heuristic, not a quality judgement): ${i.quality.level} (${i.quality.reasons.join("; ")})`);
   return lines.join("\n");
+}
+
+/** True only when the URL's parsed hostname is the business website's hostname (ignoring a leading www) or a subdomain of it. http(s) only. */
+export function isOwnSiteHost(website: string | null | undefined, candidate: string | URL): boolean {
+  try {
+    if (!website) return false;
+    const own = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(website) ? website : `https://${website}`);
+    const u = candidate instanceof URL ? candidate : new URL(candidate);
+    if (!/^https?:$/.test(u.protocol) || !/^https?:$/.test(own.protocol) || u.username || u.password) return false;
+    const a = own.hostname.toLowerCase().replace(/^www\./, ""), c = u.hostname.toLowerCase().replace(/^www\./, "");
+    return !!a && a.includes(".") && (c === a || c.endsWith(`.${a}`));
+  } catch { return false; }
 }
 
 export function contextBlock(b: BusinessIntelligence, d: Dossier, store: PipelineStore, upTo: StageId): string {
@@ -465,6 +477,16 @@ export class DossierEngine {
       // Deep website inspection: the homepage plus internal pages that the site itself links to (About, Services, Contact...), recorded page by page.
       if (b.website) {
         insp.website = await inspectWebsite(b.website, this.d.fetchDoc, () => this.now(), (page, doc) => {
+          // Content that ended on a DIFFERENT domain than the recorded website is not the recorded site: it is judged like any other candidate
+          // (name/place evidence, look-alike check) and is never marked official, and the recorded address itself is held back.
+          const finalUrl = page.finalUrl ?? page.url;
+          if (!isOwnSiteHost(b.website, finalUrl)) {
+            const rec = byKey.get(normalizeUrl(page.url));
+            if (rec && rec.origin === "record" && rec.check?.status !== "fetched") { rec.official = false; rec.relevance = "possible"; rec.reasons = [`the recorded website redirects to ${hostOf(finalUrl)}, a different domain`]; rec.decision = "pending"; rec.decidedBy = "auto"; rec.decisionReason = `the recorded website redirects to ${hostOf(finalUrl)}; not treated as the official site until the operator confirms it`; rec.check = { status: "failed", at: this.now(), reason: "redirected_to_other_domain" }; }
+            addSource({ url: finalUrl, title: page.title || `${name} — page reached by redirect`, snippet: page.description }, "redirect from the recorded website", "website");
+            const moved = byKey.get(normalizeUrl(finalUrl)); if (moved && moved.check?.status !== "fetched") { ingest(moved, doc); moved.official = false; }
+            return;
+          }
           addSource({ url: page.url, title: page.title || `${name} — ${page.role} page`, snippet: page.description }, "website inspection", page.role === "home" ? "record" : "website");
           const src = byKey.get(normalizeUrl(page.url)); if (src && src.check?.status !== "fetched") ingest(src, doc);
         });
@@ -474,7 +496,7 @@ export class DossierEngine {
           const ls = byKey.get(normalizeUrl(link)); if (ls && !(ls.reasons ?? []).includes(LINKED)) { ls.relevance = "match"; ls.reasons = [...(ls.reasons ?? []), LINKED]; ls.decision = "pending"; }
         }
       }
-      for (const src of x.sources.filter((u) => u.relevance !== "unrelated" && u.check?.status !== "fetched").slice(0, 8)) ingest(src, await this.d.fetchDoc(src.url));
+      for (const src of x.sources.filter((u) => u.relevance !== "unrelated" && u.check?.status !== "fetched" && u.check?.reason !== "redirected_to_other_domain").slice(0, 8)) ingest(src, await this.d.fetchDoc(src.url));
     }
     // Supplied profiles that could not be reached at all are still recorded, never silently dropped.
     for (const link of b.socialLinks ?? []) if (!insp.social.some((o) => o.url === link)) insp.social.push(parseSocialProfile({ url: link, fetched: false, failReason: this.d.fetchDoc ? "not_read" : undefined, at: this.now() }));
@@ -488,7 +510,7 @@ export class DossierEngine {
     for (const src of x.sources.filter((u) => u.role !== "competitor" && u.decision === "approved" && !u.decidedBy)) { src.decidedBy = "auto"; src.decisionReason ??= "validated automatically"; }
     // Contradictory claims: contact details on another source that clash with the official site are a conflict, not corroboration.
     insp.conflicts = [];
-    if (insp.website && (insp.website.contacts.phones.length || insp.website.contacts.emails.length)) {
+    if (insp.website && !insp.website.redirectedToOtherDomain && (insp.website.contacts.phones.length || insp.website.contacts.emails.length)) {
       for (const c of findContactConflicts(insp.website.contacts, x.sources.filter((u) => u.role !== "competitor" && u.decision === "approved"))) {
         const src = x.sources.find((u) => u.id === c.sourceId)!; src.decision = "pending"; src.decidedBy = "auto"; src.decisionReason = `conflicting details: ${c.detail}; not used until the operator confirms it is this business`;
         insp.conflicts.push(`${c.sourceId}: ${c.detail}`);
@@ -524,7 +546,7 @@ export class DossierEngine {
     reasonsQ.push(socialSeen ? `${socialSeen} social profile(s) partly or fully readable` : insp.social.length ? "no social profile was readable" : "no social profile identified");
     reasonsQ.push(`${approvedNow.length} source(s) validated, ${fullRead} read in full`);
     insp.quality = { level: !approvedNow.length || (!fullRead && !socialSeen) ? "insufficient" : fullRead >= 2 || (fullRead >= 1 && socialSeen >= 1) ? "sufficient" : "thin", reasons: reasonsQ, assessedAt: this.now() };
-    if (insp.quality.level !== "sufficient") note(`Research evidence is ${insp.quality.level}: ${reasonsQ.join("; ")}. Findings are limited to what this evidence supports.`);
+    if (insp.quality.level !== "sufficient") note(`Research evidence rating is ${insp.quality.level} (a count-based heuristic: pages and profiles read, sources validated; it does not judge how good the content is): ${reasonsQ.join("; ")}. Findings are limited to what this evidence supports.`);
     const ambiguity = detectIdentityAmbiguity(facts, mine);
     st.output = { queries, searchStatus: status, ...(error ? { error } : {}), candidates: x.sources.length, matched: count("match"), possible: count("possible"), unrelated: count("unrelated"), pagesRead, imageCandidates: images.length, imageSummary: imageSummary(x), observedEvidenceItems: observed,
       validation: { autoApproved: mine.filter((u) => u.decidedBy === "auto" && u.decision === "approved").length, autoRejected: mine.filter((u) => u.decidedBy === "auto" && u.decision === "rejected").length, needsConfirmation: mine.filter((u) => u.decision === "pending").length },
@@ -893,13 +915,14 @@ export class DossierEngine {
     if (!this.d.fetchDoc) { out.notes.push("Page retrieval is not configured on this server."); return out; }
     const insp = (x.inspection ??= { social: [], conflicts: [] });
     const facts = { name: b.canonicalName, address: b.address, website: b.website, phone: b.phone, category: b.category };
-    const ownHost = b.website ? normalizeUrl(b.website).split("/")[0] : "";
-    const known = new Set([...x.sources.map((u) => normalizeUrl(u.url)), ...(insp.website?.pages ?? []).map((p) => normalizeUrl(p.url)), ...(b.socialLinks ?? []).map(normalizeUrl)]);
+    // Explicit URLs are fetched only when they are on the business's own site (same parsed hostname, or a subdomain of it) or are already-known TRUSTED addresses.
+    // Rejected or pending sources are not trusted, so a look-alike or unrelated page cannot be re-fetched through chat.
+    const trusted = new Set([...x.sources.filter((u) => u.decision === "approved").map((u) => normalizeUrl(u.url)), ...(insp.website?.pages ?? []).map((p) => normalizeUrl(p.url)), ...(b.socialLinks ?? []).map(normalizeUrl)]);
     const candidates: Array<{ url: string; title?: string; snippet?: string; query: string }> = [];
     for (const raw of (req.urls ?? []).slice(0, 2)) {
       let u: URL; try { u = new URL(raw); } catch { out.notes.push(`"${clip(raw, 80)}" is not a valid URL.`); continue; }
       const key = normalizeUrl(u.toString());
-      if (!(known.has(key) || (ownHost && key.split("/")[0] === ownHost))) { out.notes.push(`${clip(raw, 80)} is not a page of this business's website or a known source, so it was not fetched.`); continue; }
+      if (!(trusted.has(key) || isOwnSiteHost(b.website, u))) { out.notes.push(`${clip(raw, 80)} is not a page of this business's website or a known source, so it was not fetched.`); continue; }
       candidates.push({ url: u.toString(), query: "requested in chat" });
     }
     if (req.query && this.d.search) {

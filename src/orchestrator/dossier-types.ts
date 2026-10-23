@@ -153,7 +153,7 @@ export interface Dossier {
   competitorApproval?: { status: "awaiting" | "approved"; approvedAt?: string; approvedBy?: string; approvedCount?: number; mode?: "auto" | "operator"; rejectedCount?: number };
   images?: ImageRef[];
   /** Evidence ledger from deep inspection: website pages read, social profiles observed, conflicts found, research quality. */
-  inspection?: { website?: WebsiteInspection; social: SocialObservation[]; conflicts: string[]; quality?: { level: "sufficient" | "thin" | "insufficient"; reasons: string[]; assessedAt: string } };
+  inspection?: { website?: WebsiteInspection; social: SocialObservation[]; conflicts: string[]; /** Count-based heuristic (pages/profiles read, sources validated). It rates how much evidence was gathered, not how good it is. */ quality?: { level: "sufficient" | "thin" | "insufficient"; reasons: string[]; assessedAt: string } };
   /** Entity identity established by the profile stage and used by every later stage. */
   identity?: { entityType: string; distinctFrom: string[] };
 }
