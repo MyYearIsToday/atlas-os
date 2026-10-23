@@ -38,6 +38,7 @@ import { ProcessController, buildCandidateView, readDossier, readMissionResult, 
 import { DossierEngine, missionContext } from "./atlas/dossier";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 import { handleSmcsRequest } from "./atlas/smcs-library";
+import { completeWithProviders, handleSmcsIntelligenceRequest } from "./atlas/smcs-intelligence";
 
 let scoutDiscoveryEnabled = false;
 /** What discovery has actually done since this server process started (enabled != running/finding businesses). */
@@ -357,8 +358,11 @@ export function createAiProxyServer(
       }
 
       if (parsedUrl.pathname.startsWith("/api/smcs/")) {
-        // Private campaign-reference library. Same PostgreSQL documents and shared-secret gate as workspace. Not part of Scout.
-        const r = await handleSmcsRequest(method, parsedUrl.pathname, parsedUrl.searchParams, () => readJsonBody(req), { persistence: atlasPipeline?.persistence ?? workspacePersistence, secretConfigured: !!process.env.ATLAS_PROXY_SHARED_SECRET });
+        const smcsCtx = { persistence: atlasPipeline?.persistence ?? workspacePersistence, secretConfigured: !!process.env.ATLAS_PROXY_SHARED_SECRET };
+        const intel = /^\/api\/smcs\/(briefs|retrieve|principles|concepts|evaluate|feedback)(\/|$)/.test(parsedUrl.pathname);
+        const r = intel
+          ? await handleSmcsIntelligenceRequest(method, parsedUrl.pathname, parsedUrl.searchParams, () => readJsonBody(req), { ...smcsCtx, model: (prompt, lineageId) => completeWithProviders(providers, prompt, lineageId) })
+          : await handleSmcsRequest(method, parsedUrl.pathname, parsedUrl.searchParams, () => readJsonBody(req), smcsCtx);
         sendJson(res, r.status, r.body);
         logRequest(method, parsedUrl.pathname, r.status, Date.now() - started);
         return;
