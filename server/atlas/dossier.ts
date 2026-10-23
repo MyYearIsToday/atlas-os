@@ -250,7 +250,7 @@ export function evidenceLedger(b: BusinessIntelligence, d: Dossier): string {
   return lines.join("\n");
 }
 
-function contextBlock(b: BusinessIntelligence, d: Dossier, store: PipelineStore, upTo: StageId): string {
+export function contextBlock(b: BusinessIntelligence, d: Dossier, store: PipelineStore, upTo: StageId): string {
   const record = [`Name: ${b.canonicalName}`, `Category: ${b.category ?? "unknown"}`, `Address: ${b.address ?? "unknown"}`, `Website: ${b.website ?? "none on record"}`, `Phone: ${b.phone ?? "none on record"}`,
     ...(b.socialLinks?.length ? [`Social profiles supplied by the operator (starting points only; verify from sources): ${b.socialLinks.join(", ")}`] : []),
     ...(b.goals?.length ? [`Goals/problems the operator believes apply (unverified, do not treat as findings): ${b.goals.join(", ")}`] : []),
@@ -880,6 +880,71 @@ export class DossierEngine {
       if (s.id === "plan") await this.createFollowUps(b, x, parsed.output.followUps as Array<{ title: string; description: string; assignedAI: string; external: boolean }>);
       return;
     }
+  }
+
+  /**
+   * Evidence retrieval on behalf of the chat. Reads at most 2 explicit pages (only pages of the business's own website, or addresses already
+   * known for it) and/or the top 3 results of one web search, then validates each page exactly like research does. Read-only; contacts no one.
+   */
+  async addEvidence(businessId: string, req: { urls?: string[]; query?: string }): Promise<{ added: Array<{ id: string; url: string; decision: string; read: boolean; reason: string }>; notes: string[] }> {
+    const x = this.get(businessId); const b = this.d.store.businesses.get(businessId);
+    const out = { added: [] as Array<{ id: string; url: string; decision: string; read: boolean; reason: string }>, notes: [] as string[] };
+    if (!x || !b) { out.notes.push("No dossier exists for this business."); return out; }
+    if (!this.d.fetchDoc) { out.notes.push("Page retrieval is not configured on this server."); return out; }
+    const insp = (x.inspection ??= { social: [], conflicts: [] });
+    const facts = { name: b.canonicalName, address: b.address, website: b.website, phone: b.phone, category: b.category };
+    const ownHost = b.website ? normalizeUrl(b.website).split("/")[0] : "";
+    const known = new Set([...x.sources.map((u) => normalizeUrl(u.url)), ...(insp.website?.pages ?? []).map((p) => normalizeUrl(p.url)), ...(b.socialLinks ?? []).map(normalizeUrl)]);
+    const candidates: Array<{ url: string; title?: string; snippet?: string; query: string }> = [];
+    for (const raw of (req.urls ?? []).slice(0, 2)) {
+      let u: URL; try { u = new URL(raw); } catch { out.notes.push(`"${clip(raw, 80)}" is not a valid URL.`); continue; }
+      const key = normalizeUrl(u.toString());
+      if (!(known.has(key) || (ownHost && key.split("/")[0] === ownHost))) { out.notes.push(`${clip(raw, 80)} is not a page of this business's website or a known source, so it was not fetched.`); continue; }
+      candidates.push({ url: u.toString(), query: "requested in chat" });
+    }
+    if (req.query && this.d.search) {
+      try { for (const r of (await this.d.search(clip(req.query, 200))).slice(0, 3)) candidates.push({ url: r.url, title: r.title, snippet: r.snippet, query: clip(req.query, 120) }); }
+      catch { out.notes.push("The web search failed, so no new search results were retrieved."); }
+    } else if (req.query) out.notes.push("Web search is not configured, so no search results were retrieved.");
+    for (const c of candidates) {
+      const key = normalizeUrl(c.url);
+      const existing = x.sources.find((u) => normalizeUrl(u.url) === key);
+      if (existing && existing.check?.status === "fetched") { out.notes.push(`${c.url} was already read as ${existing.id}.`); continue; }
+      if (x.sources.length >= 34) { out.notes.push("The source limit for this dossier was reached."); break; }
+      const kind = classifySource(c.url, b.website); const rel = scoreRelevance(facts, { url: c.url, title: c.title, snippet: c.snippet });
+      const src: SourceRef = existing ?? { id: `S${Math.max(0, ...x.sources.map((u) => Number(u.id.slice(1)) || 0)) + 1}`, url: clip(c.url, 400), title: clip(c.title, 200) || clip(c.url, 100), snippet: clip(c.snippet, 500), query: c.query, retrievedAt: this.now(), confidence: "unverified", kind, relevance: rel.relevance, reasons: rel.reasons, decision: rel.relevance === "unrelated" ? "rejected" : "pending", official: kind === "official_site" && rel.relevance === "match", origin: "chat", check: { status: "not_checked" } };
+      if (!existing) x.sources.push(src);
+      const doc = await this.d.fetchDoc(src.url);
+      if (!doc.ok || !doc.body) { src.check = { status: "failed", at: this.now(), reason: doc.reason ?? "unreadable" }; out.added.push({ id: src.id, url: src.url, decision: src.decision ?? "pending", read: false, reason: `could not be read (${doc.reason ?? "unreadable"})` }); continue; }
+      const bodyText = htmlToText(doc.body); const meta = htmlMeta(doc.body);
+      const loginWall = src.kind === "social" && (bodyText.length < 400 || /\b(log ?in|sign ?up|create new account|join facebook)\b/i.test(bodyText.slice(0, 600)));
+      if (src.kind === "social") insp.social = [...insp.social.filter((o) => o.url !== src.url), parseSocialProfile({ url: src.url, fetched: true, loginWall, title: htmlTitle(doc.body), metaText: meta, bodyText, at: this.now() })];
+      if (loginWall && !meta) { src.check = { status: "failed", at: this.now(), reason: "login_wall: the profile is not readable without logging in" }; out.added.push({ id: src.id, url: src.url, decision: src.decision ?? "pending", read: false, reason: "behind a login wall" }); continue; }
+      src.pageText = clip(loginWall ? meta : bodyText, loginWall ? 1500 : 6000); src.confidence = "checked";
+      src.check = loginWall ? { status: "fetched", at: this.now(), reason: "meta_only: only the public description tags were readable (the profile itself is behind a login)" } : { status: "fetched", at: this.now() };
+      const r2 = scoreRelevance(facts, { url: src.url, title: src.title, snippet: src.snippet, pageText: src.pageText }); src.relevance = r2.relevance; src.reasons = r2.reasons;
+      src.official = src.official || (src.kind === "official_site" && r2.relevance === "match");
+      if (src.decidedBy !== "operator") { const v = decideBusinessSource(facts, src); src.decision = v.decision; src.decidedBy = "auto"; src.decisionReason = v.reason; if (v.decision !== "approved") src.official = false; }
+      out.added.push({ id: src.id, url: src.url, decision: src.decision ?? "pending", read: true, reason: src.decisionReason ?? "" });
+    }
+    this.save(x); await this.d.flush?.();
+    return out;
+  }
+
+  /** A mission proposed from a chat: Approval Required, never auto-run, de-duplicated by a stable key. Returns the existing one if already created. */
+  async createProposedMission(businessId: string, f: { title: string; description: string; assignedAI: string; external: boolean }): Promise<{ taskId: string } | null> {
+    const x = this.get(businessId); const b = this.d.store.businesses.get(businessId);
+    if (!x || !b) return null;
+    const key = createHash("sha256").update(`${b.id}|chat|${f.title.toLowerCase()}`).digest("hex").slice(0, 16);
+    const prior = x.followUps.find((u) => u.key === key); if (prior) return { taskId: prior.taskId };
+    const task = await this.d.missionQueue.create({
+      title: `Proposed in chat: ${f.title} — ${b.canonicalName}`,
+      description: `${f.external ? "EXTERNAL ACTION: prepare a DRAFT only; nothing may be sent, published, created on any platform or spent without the operator's explicit approval.\n" : "Internal work proposed during a chat with the operator.\n"}${f.description}\n\n(Source: chat about business ${b.id}. Treat hypotheses as unverified.)`,
+      assignedAI: (AGENTS.has(f.assignedAI) ? f.assignedAI : "operator") as Task["assignedAI"], clientId: b.id, priority: "Medium", approvalRequired: "Approval Required", missionType: "dossier_followup", dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
+    });
+    x.followUps.push({ key, taskId: task.taskId, title: f.title, assignedAI: f.assignedAI, external: f.external } satisfies FollowUpRef);
+    this.save(x); await this.d.flush?.();
+    return { taskId: task.taskId };
   }
 
   /** Follow-up missions are Approval Required, never auto-run, de-duplicated by a stable key. */
