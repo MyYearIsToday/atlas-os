@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { BusinessIntelligence } from "../../src/services/evidence/business-intelligence-types";
+import type { BusinessIntelligence } from "../../src/services/evidence/business-intelligence";
 import type { Deliverable, Dossier, DossierExecution, PerformanceRecord, StrategyDecision } from "../../src/orchestrator/dossier-types";
 
 /**
