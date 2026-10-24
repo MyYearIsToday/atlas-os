@@ -51,10 +51,12 @@ export interface SourceRef {
   decidedBy?: "auto" | "operator";
   decisionReason?: string;
   official?: boolean;
-  origin?: "search" | "record" | "operator";
+  origin?: "search" | "record" | "operator" | "website" | "chat";
   /** "competitor" sources describe another business and are shown/approved separately from the business's own sources. */
   role?: "business" | "competitor";
   check?: { status: "fetched" | "failed" | "not_checked"; at?: string; reason?: string };
+  /** How strongly this source is judged to belong to THIS business (domain, identity, branding, contact details, content, corroboration). Evidence for ranking and ambiguity only; never makes a claim verified. */
+  rank?: { score: number; level: "strong" | "moderate" | "weak"; factors: string[] };
   /** Fetched page text (bounded). The only text a claim may be verified against. */
   pageText?: string;
 }
@@ -101,6 +103,57 @@ export interface ImageRef {
   rights: { status: "unknown" | "owner_permission" | "licensed" | "not_permitted"; note: string; updatedBy?: string; updatedAt?: string };
 }
 export const DEFAULT_IMAGE_RIGHTS = { status: "unknown" as const, note: "Belongs to the business or a third party. Reuse in published marketing needs the owner's permission or a licence; none is recorded." };
+
+// ---- deep research evidence ledger (what was actually inspected, and what was not)
+export type PageRole = "home" | "about" | "services" | "contact" | "team" | "portfolio" | "pricing" | "events" | "blog" | "other";
+export interface InspectedPage {
+  url: string; finalUrl?: string; role: PageRole; at: string;
+  status: "read" | "failed";
+  reason?: string; httpStatus?: number;
+  title?: string; description?: string; headings: string[]; textChars: number; excerpt: string;
+  emails: string[]; phones: string[]; socialLinks: string[];
+  rendering: "static" | "js_required";
+}
+export interface WebsiteInspection {
+  /** Set when Atlas found this site itself (the business record had no website). It is a candidate, never recorded as the official site. */
+  discovered?: boolean;
+  site: string; startedAt: string; finishedAt: string;
+  pages: InspectedPage[];
+  /** Set when the supplied address ended on a different domain. The content is still the operator-supplied site, but this is flagged. */
+  redirectedToOtherDomain?: string;
+  contacts: { emails: string[]; phones: string[] };
+  socialLinks: string[];
+  limits: string[];
+}
+export type SocialAccess = "full_page" | "meta_only" | "login_wall" | "unreachable" | "not_checked";
+export interface SocialObservation {
+  platform: string; url: string; handle?: string;
+  access: SocialAccess; checkedAt: string; reason?: string;
+  title?: string; bio?: string;
+  followers?: string; following?: string; posts?: string; likes?: string;
+  /** Plain statements taken directly from readable text. */
+  observed: string[];
+  /** Interpretation of the observed text only; never presented as fact. */
+  inferred: string[];
+  /** What Atlas could not see, so nobody mistakes a gap for a finding. */
+  inaccessible: string[];
+  themes: string[];
+}
+/** One investigation round of the adaptive research loop: what was missing, what was chosen, what happened. */
+export interface ResearchLoopRound {
+  round: number; planner: "ai" | "fallback"; reasoning?: string;
+  gaps: Array<{ kind: string; detail: string }>;
+  actions: Array<{ type: "search" | "fetch" | "inspect_site"; target: string; gap?: string; outcome: string; newSources: number; read: number }>;
+}
+export interface ResearchLoopTrace {
+  startedAt: string; finishedAt: string;
+  rounds: ResearchLoopRound[];
+  /** sufficient | max_rounds | budget | deadline | no_new_actions | ambiguous | no_search_configured */
+  stopReason: string;
+  used: { searches: number; fetches: number; plannerCalls: number };
+  limits: { maxRounds: number; maxSearches: number; maxFetches: number; maxPlannerCalls: number; deadlineMs: number };
+  remainingGaps: Array<{ kind: string; detail: string }>;
+}
 export interface FollowUpRef { key: string; taskId: string; title: string; assignedAI: string; external: boolean }
 
 export interface Dossier {
@@ -118,4 +171,8 @@ export interface Dossier {
   /** Second operator checkpoint: candidate competitors. Only approved competitor sources are analysed. */
   competitorApproval?: { status: "awaiting" | "approved"; approvedAt?: string; approvedBy?: string; approvedCount?: number; mode?: "auto" | "operator"; rejectedCount?: number };
   images?: ImageRef[];
+  /** Evidence ledger from deep inspection: website pages read, social profiles observed, conflicts found, research quality. */
+  inspection?: { website?: WebsiteInspection; social: SocialObservation[]; conflicts: string[]; loop?: ResearchLoopTrace; /** Count-based heuristic (pages/profiles read, sources validated). It rates how much evidence was gathered, not how good it is. */ quality?: { level: "sufficient" | "thin" | "insufficient"; reasons: string[]; assessedAt: string } };
+  /** Entity identity established by the profile stage and used by every later stage. */
+  identity?: { entityType: string; distinctFrom: string[] };
 }

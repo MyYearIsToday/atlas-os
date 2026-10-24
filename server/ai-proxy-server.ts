@@ -34,8 +34,10 @@ import { TavilyWebDiscoveryProvider } from "../src/services/web-intelligence/tav
 import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/web-intelligence/provider";
 import { MultimodalIntelligenceService } from "../src/services/multimodal-intelligence/service";
 import { buildBusinessView } from "./atlas/business-view";
+import { parseResearchRequest } from "./atlas/research-request";
 import { ProcessController, buildCandidateView, readDossier, readMissionResult, startCandidate, type ActionContext } from "./atlas/scout-actions";
 import { DossierEngine, missionContext } from "./atlas/dossier";
+import { ChatService, parseProposalRequest, type ChatModel } from "./atlas/chat";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 
 let scoutDiscoveryEnabled = false;
@@ -50,6 +52,7 @@ let workspacePersistence: AtlasPersistence | null = null;
 let discoveryTrigger: (() => Promise<{ ok: boolean; candidatesFound: number; error?: string; outcomes: { action: string }[] } | null>) | null = null;
 const processController = new ProcessController();
 let dossierEngine: DossierEngine | null = null;
+let chatService: ChatService | null = null;
 let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean; persistence: AtlasPersistence | null; migrations: number[]; autonomy: AutonomyRuntime } | null = null;
 
 /**
@@ -382,7 +385,7 @@ export function createAiProxyServer(
         return;
       }
 
-      if (url === "/api/scout/candidates" || url === "/api/scout/candidates/start" || url === "/api/atlas/process" || url.startsWith("/api/atlas/dossiers/")) {
+      if (url === "/api/scout/candidates" || url === "/api/scout/candidates/start" || url === "/api/scout/research" || url === "/api/atlas/process" || url.startsWith("/api/atlas/dossiers/")) {
         // Scout visibility, per-business operator authorisation, the staged internal dossier and one bounded on-demand cycle. Internal work only.
         if (!atlasPipeline || !scoutPipeline || !dossierEngine) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline or Scout is not running" } }); logRequest(method, url, 503, Date.now() - started); return; }
         const actionCtx: ActionContext = {
@@ -391,11 +394,38 @@ export function createAiProxyServer(
           engine: dossierEngine,
         };
         let status = 200; let payload: unknown;
-        if (method === "GET" && url === "/api/scout/candidates") {
+        const chatMatch = /^\/api\/atlas\/dossiers\/([A-Za-z0-9_-]{1,80})\/chat(\/proposals)?$/.exec(url);
+        if (chatMatch) {
+          if (!chatService) { status = 503; payload = { ok: false, error: "chat_unavailable", message: "Chat is not running on this server." }; }
+          else if (method === "GET" && !chatMatch[2]) {
+            const conv = chatService.history(chatMatch[1]);
+            if (!conv) { status = 404; payload = { ok: false, error: "not_found" }; } else payload = { ok: true, available: chatService.available, busy: chatService.isBusy(chatMatch[1]), conversation: conv };
+          } else if (method === "POST" && !chatMatch[2]) {
+            ({ status, body: payload } = await chatService.ask(chatMatch[1], ((await readJsonBody(req)) as { message?: unknown } | null)?.message));
+          } else if (method === "POST" && chatMatch[2]) {
+            const pr = parseProposalRequest(await readJsonBody(req));
+            if (!pr.ok) { status = 400; payload = { ok: false, error: "invalid_decision", message: pr.message }; }
+            else ({ status, body: payload } = await chatService.decideProposal(chatMatch[1], pr.messageId, pr.proposalId, pr.decision));
+          } else { status = 405; payload = { error: { code: "method_not_allowed", message: "unsupported method" } }; }
+        } else if (method === "GET" && url === "/api/scout/candidates") {
           payload = { durable: !!atlasPipeline.persistence, discovery: scoutDiscoveryStatus, items: buildCandidateView({ discovered: scoutPipeline.repository.list(), pipeline: { deps: atlasPipeline.deps, autonomy: atlasPipeline.autonomy } }) };
         } else if (method === "POST" && url === "/api/scout/candidates/start") {
           const body = await readJsonBody(req);
           ({ status, body: payload } = await startCandidate(actionCtx, (body as { businessId?: unknown } | null)?.businessId));
+        } else if (method === "POST" && url === "/api/scout/research") {
+          // "Research <name>": records the business by name alone, then starts the autonomous research loop. Atlas finds its own sources.
+          const body = (await readJsonBody(req)) as { query?: unknown; place?: unknown } | null;
+          const parsed = parseResearchRequest(body?.query, body?.place);
+          if (!parsed.ok) { status = 400; payload = { ok: false, error: "invalid_request", message: parsed.message }; }
+          else {
+            const { repository, orchestrator } = scoutPipeline;
+            const made = await submitManualBusiness({ businessName: parsed.name, category: "To be determined", city: parsed.place, country: "Ghana", source: "Manual entry", notes: "Created from a research-by-name request; Atlas discovers the website and profiles itself." }, { repository, dispatch: (type, p) => orchestrator.dispatch(type, p) });
+            if (!made.ok) { status = 400; payload = { ok: false, error: "invalid_request", message: "The business could not be recorded.", errors: made.errors }; }
+            else {
+              const started = await startCandidate(actionCtx, made.outcome.businessId);
+              status = started.status; payload = { ...(started.body as object), businessId: made.outcome.businessId, recorded: made.outcome.action, duplicateStatus: made.outcome.duplicateStatus };
+            }
+          }
         } else if (method === "POST" && url === "/api/atlas/process") {
           const { started, done } = processController.begin(actionCtx, scoutPipeline.repository.list());
           if (!started) { status = 409; payload = { ok: false, error: "already_running", ...processController.status() }; }
@@ -644,8 +674,25 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       const searchProvider = new TavilyWebDiscoveryProvider();
       dossierEngine = new DossierEngine({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 6 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })),
         fetchDoc: safeFetch,
+        // Research-loop planner: the same free-routed Workforce as the dossier stages, only when mission execution is enabled. Without it the loop uses its deterministic planner.
+        plan: executionEnabled && providers?.workforce ? async (prompt) => {
+          try {
+            const r = await providers!.workforce.execute({ workerRole: "researcher", taskType: "deep_research", task: "Choose the next research steps for one business. Reply with JSON only.", priority: 2, confidenceTarget: 0.5, budgetLimitUsd: 0.05, maxTokens: 900, temperature: 0.2, timeoutMs: 45_000, lineageId: "atlas-research-plan", messages: [{ role: "user", content: prompt }] });
+            return r.failed ? null : r.text;
+          } catch { return null; }
+        } : undefined,
         inspectImage: pipelineDeps.multimodalIntelligence?.inspect ? (businessId, req) => pipelineDeps!.multimodalIntelligence!.inspect!({ businessId, prompt: req.prompt, mimeType: req.mimeType, dataUrl: req.dataUrl, ...(req.excludeModels ? { excludeModels: req.excludeModels } : {}), ...(req.references ? { references: req.references } : {}) }) : undefined });
       const engine = dossierEngine;
+      // Business-scoped chat. It calls the same free-routed AI Workforce as the dossier stages (no new provider, no paid fallback) and only when mission execution is enabled.
+      const chatModel: ChatModel | undefined = executionEnabled && providers?.workforce ? async ({ system, messages, businessId }) => {
+        try {
+          const r = await providers!.workforce.execute({ workerRole: "analyst", taskType: "business_analysis", task: "Answer the operator's question about one business using only the supplied context.", priority: 2, confidenceTarget: 0.5, budgetLimitUsd: 0.1, maxTokens: 3500, temperature: 0.3, timeoutMs: 90_000, lineageId: `atlas-chat:${businessId}`, messages: [{ role: "system", content: system }, ...messages] });
+          return r.failed ? { ok: false as const, reason: `${r.code}` } : { ok: true as const, text: r.text, provider: r.provider, model: r.model };
+        } catch { return { ok: false as const, reason: "provider error" }; }
+      } : undefined;
+      chatService = new ChatService({ store: pipelineDeps.store, engine, model: chatModel, persistence });
+      try { const n = await chatService.hydrate(); console.log(`[atlas-chat] ${chatModel ? "enabled" : "disabled (AI Workforce execution is off)"} conversations=${n}`); }
+      catch (e) { throw new FatalStartupError(`chat hydration failed: ${e instanceof Error ? e.message : "unknown"}`); }
       const autonomyScheduler = new AutonomyScheduler(async (trigger) => { const c = await runAutonomyCycle(cycleDeps, trigger); if (trigger === "scheduled") await engine.tick(3).catch((e) => console.error(`[atlas-dossier] tick error: ${e instanceof Error ? e.message : "unknown"}`)); await persistence?.flush(); return c; }, (e) => console.error(`[atlas-autonomy] cycle error: ${e instanceof Error ? e.message : "unknown"}`));
       const autonomyEnabled = process.env.ATLAS_AUTONOMY_ENABLED === "true";
       const autonomy: AutonomyRuntime = { policy: defaultAutonomyPolicy, lifecycle, pipeline: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, ledger, revenue, approvals, scheduler: autonomyScheduler, autonomyEnabled, executionEnabled, persistenceHealth: () => persistence?.health() ?? null, metricInputs, now: () => new Date().toISOString() };

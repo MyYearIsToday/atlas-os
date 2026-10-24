@@ -1,4 +1,5 @@
 import { lookup } from "node:dns/promises";
+import { websiteKey } from "../../src/services/evidence/business-deduplication";
 import { isIP } from "node:net";
 
 /**
@@ -76,6 +77,13 @@ export function scoreRelevance(b: BusinessFacts, s: SourceText): { relevance: Re
   if (placeHit) reasons.push("mentions the business's location");
 
   if (domainMatch || phoneHit) return { relevance: "match", reasons };
+  // A parent or host institution (an acronym in the name, e.g. UGBS) is not this entity: text about it alone proves nothing.
+  const acr = b.name.split(/\s+/).map((w) => w.replace(/[^A-Za-z0-9]/g, "")).filter((w) => w.length >= 3 && w === w.toUpperCase() && /[A-Z]/.test(w));
+  if (acr.length && acr.length < b.name.split(/\s+/).filter(Boolean).length) {
+    const distinct = tokens.filter((t) => !acr.some((a) => a.toLowerCase() === t));
+    const mentionsParent = acr.some((a) => padded.includes(` ${a.toLowerCase()} `));
+    if (mentionsParent && distinct.length && !distinct.some((t) => padded.includes(` ${t} `))) { reasons.push(`about the parent or host organisation (${acr.join(", ")}), not this entity`); return { relevance: "unrelated", reasons }; }
+  }
   if (!tokens.length || !tokenHits) { reasons.push("does not mention the business name: likely a different organisation"); return { relevance: "unrelated", reasons }; }
   if ((phraseHit || allTokens) && placeHit) return { relevance: "match", reasons };
   if (phraseHit || allTokens) { reasons.push("name matches but nothing confirms the location, domain or contact: it may be a parent organisation, department or similarly named business"); return { relevance: "possible", reasons }; }
@@ -187,3 +195,17 @@ export function quoteSupported(quote: string | undefined, pageText: string | und
   const q = squash(quote);
   return q.length >= 20 && squash(pageText).includes(q);
 }
+
+/** True only when the URL's parsed hostname is the business website's hostname (ignoring a leading www) or a subdomain of it. http(s) only. */
+export function isOwnSiteHost(website: string | null | undefined, candidate: string | URL): boolean {
+  try {
+    if (!website) return false;
+    const own = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(website) ? website : `https://${website}`);
+    const u = candidate instanceof URL ? candidate : new URL(candidate);
+    if (!/^https?:$/.test(u.protocol) || !/^https?:$/.test(own.protocol) || u.username || u.password) return false;
+    const a = own.hostname.toLowerCase().replace(/^www\./, ""), c = u.hostname.toLowerCase().replace(/^www\./, "");
+    if (websiteKey(website) === null) return false; // a social, link-in-bio or other shared host is not the business's own domain: no host-wide trust
+    return !!a && a.includes(".") && (c === a || c.endsWith(`.${a}`));
+  } catch { return false; }
+}
+
