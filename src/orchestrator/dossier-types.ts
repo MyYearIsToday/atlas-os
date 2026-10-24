@@ -154,6 +154,20 @@ export interface ResearchLoopTrace {
   limits: { maxRounds: number; maxSearches: number; maxFetches: number; maxPlannerCalls: number; deadlineMs: number };
   remainingGaps: Array<{ kind: string; detail: string }>;
 }
+/** Operator decision on one growth recommendation. Only approved strategies can produce deliverables. */
+export interface StrategyDecision { key: string; title: string; decision: "approved" | "declined"; decidedBy: string; decidedAt: string; reason?: string }
+/** An internal deliverable mission created from an approved strategy. Always Approval Required; nothing is published or sent. */
+export interface Deliverable {
+  id: string; kind: "campaign_brief" | "content_draft" | "creative_asset"; strategyKey: string; strategyTitle: string;
+  campaign?: string; contentIndex?: number; taskId: string; title: string; sourceRefs: string[]; createdAt: string; createdBy: string;
+}
+/** Results typed in by the operator from a real platform. Atlas never generates, estimates or imports these on its own. */
+export interface PerformanceRecord {
+  id: string; campaign: string; deliverableId?: string; metric: string; value: number; unit?: string;
+  period: { from: string; to: string }; origin: "operator_entered"; recordedBy: string; recordedAt: string; note?: string;
+}
+export interface DossierExecution { strategies: StrategyDecision[]; deliverables: Deliverable[]; performance: PerformanceRecord[] }
+
 export interface FollowUpRef { key: string; taskId: string; title: string; assignedAI: string; external: boolean }
 
 export interface Dossier {
@@ -171,6 +185,8 @@ export interface Dossier {
   /** Second operator checkpoint: candidate competitors. Only approved competitor sources are analysed. */
   competitorApproval?: { status: "awaiting" | "approved"; approvedAt?: string; approvedBy?: string; approvedCount?: number; mode?: "auto" | "operator"; rejectedCount?: number };
   images?: ImageRef[];
+  /** Strategy approvals, deliverables and operator-entered results linked to this dossier's recommendations and campaigns. */
+  execution?: DossierExecution;
   /** Evidence ledger from deep inspection: website pages read, social profiles observed, conflicts found, research quality. */
   inspection?: { website?: WebsiteInspection; social: SocialObservation[]; conflicts: string[]; loop?: ResearchLoopTrace; /** Count-based heuristic (pages/profiles read, sources validated). It rates how much evidence was gathered, not how good it is. */ quality?: { level: "sufficient" | "thin" | "insufficient"; reasons: string[]; assessedAt: string } };
   /** Entity identity established by the profile stage and used by every later stage. */

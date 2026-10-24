@@ -441,6 +441,10 @@ export function createAiProxyServer(
           ({ status, body: payload } = body.action === "rediscover"
             ? (() => { const r = dossierEngine!.rediscover(id); if (r.ok) dossierEngine!.kick(id); return { status: r.ok ? 200 : 409, body: { ok: r.ok, ...(r.reason ? { error: r.reason } : {}) } }; })()
             : await dossierEngine.applyAction(id, body));
+        } else if (method === "POST" && /^\/api\/atlas\/dossiers\/[A-Za-z0-9_-]{1,80}\/execution$/.test(url)) {
+          // Strategy decisions, deliverable missions (Approval Required) and operator-entered results. Internal only; nothing is sent or published.
+          const id = url.split("/")[4];
+          ({ status, body: payload } = await dossierEngine.executionAction(id, ((await readJsonBody(req)) ?? {}) as Record<string, unknown>));
         } else if (method === "GET" && url.startsWith("/api/atlas/dossiers/")) {
           const id = decodeURIComponent(url.slice("/api/atlas/dossiers/".length));
           const found = /^[A-Za-z0-9_-]{1,80}$/.test(id) ? readDossier(atlasPipeline.deps, id) : null;
