@@ -12,7 +12,11 @@ export type Collection =
   | "mission" | "mission_output" | "dossier" | "conversation" | "ledger" | "trace" | "started"
   | "prospect" | "engagement" | "decision" | "invoice" | "approval" | "cycle" | "decision_exec" | "autonomy_state"
   // Workspace records saved from the Atlas frontend (see server/workspace/workspace-store.ts); same atlas_documents table, no migration.
-  | "workspace_leads" | "workspace_missions" | "workspace_content" | "workspace_opportunities" | "workspace_clients" | "workspace_businesses" | "workspace_expenses" | "workspace_income";
+  | "workspace_leads" | "workspace_missions" | "workspace_content" | "workspace_opportunities" | "workspace_clients" | "workspace_businesses" | "workspace_expenses" | "workspace_income"
+  // SMCS campaign reference library (server/atlas/smcs-library.ts). Same table; no migration, no second database.
+  | "smcs_campaign_reference"
+  // SMCS briefs, generations and operator feedback (server/atlas/smcs-intelligence.ts). Same table.
+  | "smcs_brief" | "smcs_generation" | "smcs_feedback";
 
 export interface SqlClient {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, any>> }>;

@@ -39,6 +39,8 @@ import { ProcessController, buildCandidateView, readDossier, readMissionResult, 
 import { DossierEngine, missionContext } from "./atlas/dossier";
 import { ChatService, parseProposalRequest, type ChatModel } from "./atlas/chat";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
+import { handleSmcsRequest } from "./atlas/smcs-library";
+import { completeWithProviders, handleSmcsIntelligenceRequest } from "./atlas/smcs-intelligence";
 
 let scoutDiscoveryEnabled = false;
 /** What discovery has actually done since this server process started (enabled != running/finding businesses). */
@@ -353,6 +355,17 @@ export function createAiProxyServer(
       if (parsedUrl.pathname.startsWith("/api/workspace/")) {
         // Workspace records persist through the pipeline's PostgreSQL store; null persistence -> 503 (never RAM).
         const r = await handleWorkspaceRequest(method, parsedUrl.pathname, () => readJsonBody(req), { persistence: atlasPipeline?.persistence ?? workspacePersistence, secretConfigured: !!process.env.ATLAS_PROXY_SHARED_SECRET });
+        sendJson(res, r.status, r.body);
+        logRequest(method, parsedUrl.pathname, r.status, Date.now() - started);
+        return;
+      }
+
+      if (parsedUrl.pathname.startsWith("/api/smcs/")) {
+        const smcsCtx = { persistence: atlasPipeline?.persistence ?? workspacePersistence, secretConfigured: !!process.env.ATLAS_PROXY_SHARED_SECRET };
+        const intel = /^\/api\/smcs\/(briefs|retrieve|principles|concepts|evaluate|feedback)(\/|$)/.test(parsedUrl.pathname);
+        const r = intel
+          ? await handleSmcsIntelligenceRequest(method, parsedUrl.pathname, parsedUrl.searchParams, () => readJsonBody(req), { ...smcsCtx, model: (prompt, lineageId) => completeWithProviders(providers, prompt, lineageId) })
+          : await handleSmcsRequest(method, parsedUrl.pathname, parsedUrl.searchParams, () => readJsonBody(req), smcsCtx);
         sendJson(res, r.status, r.body);
         logRequest(method, parsedUrl.pathname, r.status, Date.now() - started);
         return;
