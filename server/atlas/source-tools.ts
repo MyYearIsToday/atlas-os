@@ -1,4 +1,5 @@
 import { lookup } from "node:dns/promises";
+import { websiteKey } from "../../src/services/evidence/business-deduplication";
 import { isIP } from "node:net";
 
 /**
@@ -194,3 +195,17 @@ export function quoteSupported(quote: string | undefined, pageText: string | und
   const q = squash(quote);
   return q.length >= 20 && squash(pageText).includes(q);
 }
+
+/** True only when the URL's parsed hostname is the business website's hostname (ignoring a leading www) or a subdomain of it. http(s) only. */
+export function isOwnSiteHost(website: string | null | undefined, candidate: string | URL): boolean {
+  try {
+    if (!website) return false;
+    const own = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(website) ? website : `https://${website}`);
+    const u = candidate instanceof URL ? candidate : new URL(candidate);
+    if (!/^https?:$/.test(u.protocol) || !/^https?:$/.test(own.protocol) || u.username || u.password) return false;
+    const a = own.hostname.toLowerCase().replace(/^www\./, ""), c = u.hostname.toLowerCase().replace(/^www\./, "");
+    if (websiteKey(website) === null) return false; // a social, link-in-bio or other shared host is not the business's own domain: no host-wide trust
+    return !!a && a.includes(".") && (c === a || c.endsWith(`.${a}`));
+  } catch { return false; }
+}
+

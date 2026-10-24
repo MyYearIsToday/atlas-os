@@ -55,6 +55,8 @@ export interface SourceRef {
   /** "competitor" sources describe another business and are shown/approved separately from the business's own sources. */
   role?: "business" | "competitor";
   check?: { status: "fetched" | "failed" | "not_checked"; at?: string; reason?: string };
+  /** How strongly this source is judged to belong to THIS business (domain, identity, branding, contact details, content, corroboration). Evidence for ranking and ambiguity only; never makes a claim verified. */
+  rank?: { score: number; level: "strong" | "moderate" | "weak"; factors: string[] };
   /** Fetched page text (bounded). The only text a claim may be verified against. */
   pageText?: string;
 }
@@ -113,6 +115,8 @@ export interface InspectedPage {
   rendering: "static" | "js_required";
 }
 export interface WebsiteInspection {
+  /** Set when Atlas found this site itself (the business record had no website). It is a candidate, never recorded as the official site. */
+  discovered?: boolean;
   site: string; startedAt: string; finishedAt: string;
   pages: InspectedPage[];
   /** Set when the supplied address ended on a different domain. The content is still the operator-supplied site, but this is flagged. */
@@ -135,6 +139,21 @@ export interface SocialObservation {
   inaccessible: string[];
   themes: string[];
 }
+/** One investigation round of the adaptive research loop: what was missing, what was chosen, what happened. */
+export interface ResearchLoopRound {
+  round: number; planner: "ai" | "fallback"; reasoning?: string;
+  gaps: Array<{ kind: string; detail: string }>;
+  actions: Array<{ type: "search" | "fetch" | "inspect_site"; target: string; gap?: string; outcome: string; newSources: number; read: number }>;
+}
+export interface ResearchLoopTrace {
+  startedAt: string; finishedAt: string;
+  rounds: ResearchLoopRound[];
+  /** sufficient | max_rounds | budget | deadline | no_new_actions | ambiguous | no_search_configured */
+  stopReason: string;
+  used: { searches: number; fetches: number; plannerCalls: number };
+  limits: { maxRounds: number; maxSearches: number; maxFetches: number; maxPlannerCalls: number; deadlineMs: number };
+  remainingGaps: Array<{ kind: string; detail: string }>;
+}
 export interface FollowUpRef { key: string; taskId: string; title: string; assignedAI: string; external: boolean }
 
 export interface Dossier {
@@ -153,7 +172,7 @@ export interface Dossier {
   competitorApproval?: { status: "awaiting" | "approved"; approvedAt?: string; approvedBy?: string; approvedCount?: number; mode?: "auto" | "operator"; rejectedCount?: number };
   images?: ImageRef[];
   /** Evidence ledger from deep inspection: website pages read, social profiles observed, conflicts found, research quality. */
-  inspection?: { website?: WebsiteInspection; social: SocialObservation[]; conflicts: string[]; /** Count-based heuristic (pages/profiles read, sources validated). It rates how much evidence was gathered, not how good it is. */ quality?: { level: "sufficient" | "thin" | "insufficient"; reasons: string[]; assessedAt: string } };
+  inspection?: { website?: WebsiteInspection; social: SocialObservation[]; conflicts: string[]; loop?: ResearchLoopTrace; /** Count-based heuristic (pages/profiles read, sources validated). It rates how much evidence was gathered, not how good it is. */ quality?: { level: "sufficient" | "thin" | "insufficient"; reasons: string[]; assessedAt: string } };
   /** Entity identity established by the profile stage and used by every later stage. */
   identity?: { entityType: string; distinctFrom: string[] };
 }

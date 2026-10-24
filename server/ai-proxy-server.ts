@@ -34,6 +34,7 @@ import { TavilyWebDiscoveryProvider } from "../src/services/web-intelligence/tav
 import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/web-intelligence/provider";
 import { MultimodalIntelligenceService } from "../src/services/multimodal-intelligence/service";
 import { buildBusinessView } from "./atlas/business-view";
+import { parseResearchRequest } from "./atlas/research-request";
 import { ProcessController, buildCandidateView, readDossier, readMissionResult, startCandidate, type ActionContext } from "./atlas/scout-actions";
 import { DossierEngine, missionContext } from "./atlas/dossier";
 import { ChatService, parseProposalRequest, type ChatModel } from "./atlas/chat";
@@ -384,7 +385,7 @@ export function createAiProxyServer(
         return;
       }
 
-      if (url === "/api/scout/candidates" || url === "/api/scout/candidates/start" || url === "/api/atlas/process" || url.startsWith("/api/atlas/dossiers/")) {
+      if (url === "/api/scout/candidates" || url === "/api/scout/candidates/start" || url === "/api/scout/research" || url === "/api/atlas/process" || url.startsWith("/api/atlas/dossiers/")) {
         // Scout visibility, per-business operator authorisation, the staged internal dossier and one bounded on-demand cycle. Internal work only.
         if (!atlasPipeline || !scoutPipeline || !dossierEngine) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline or Scout is not running" } }); logRequest(method, url, 503, Date.now() - started); return; }
         const actionCtx: ActionContext = {
@@ -411,6 +412,20 @@ export function createAiProxyServer(
         } else if (method === "POST" && url === "/api/scout/candidates/start") {
           const body = await readJsonBody(req);
           ({ status, body: payload } = await startCandidate(actionCtx, (body as { businessId?: unknown } | null)?.businessId));
+        } else if (method === "POST" && url === "/api/scout/research") {
+          // "Research <name>": records the business by name alone, then starts the autonomous research loop. Atlas finds its own sources.
+          const body = (await readJsonBody(req)) as { query?: unknown; place?: unknown } | null;
+          const parsed = parseResearchRequest(body?.query, body?.place);
+          if (!parsed.ok) { status = 400; payload = { ok: false, error: "invalid_request", message: parsed.message }; }
+          else {
+            const { repository, orchestrator } = scoutPipeline;
+            const made = await submitManualBusiness({ businessName: parsed.name, category: "To be determined", city: parsed.place, country: "Ghana", source: "Manual entry", notes: "Created from a research-by-name request; Atlas discovers the website and profiles itself." }, { repository, dispatch: (type, p) => orchestrator.dispatch(type, p) });
+            if (!made.ok) { status = 400; payload = { ok: false, error: "invalid_request", message: "The business could not be recorded.", errors: made.errors }; }
+            else {
+              const started = await startCandidate(actionCtx, made.outcome.businessId);
+              status = started.status; payload = { ...(started.body as object), businessId: made.outcome.businessId, recorded: made.outcome.action, duplicateStatus: made.outcome.duplicateStatus };
+            }
+          }
         } else if (method === "POST" && url === "/api/atlas/process") {
           const { started, done } = processController.begin(actionCtx, scoutPipeline.repository.list());
           if (!started) { status = 409; payload = { ok: false, error: "already_running", ...processController.status() }; }
@@ -659,6 +674,13 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       const searchProvider = new TavilyWebDiscoveryProvider();
       dossierEngine = new DossierEngine({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 6 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })),
         fetchDoc: safeFetch,
+        // Research-loop planner: the same free-routed Workforce as the dossier stages, only when mission execution is enabled. Without it the loop uses its deterministic planner.
+        plan: executionEnabled && providers?.workforce ? async (prompt) => {
+          try {
+            const r = await providers!.workforce.execute({ workerRole: "researcher", taskType: "deep_research", task: "Choose the next research steps for one business. Reply with JSON only.", priority: 2, confidenceTarget: 0.5, budgetLimitUsd: 0.05, maxTokens: 900, temperature: 0.2, timeoutMs: 45_000, lineageId: "atlas-research-plan", messages: [{ role: "user", content: prompt }] });
+            return r.failed ? null : r.text;
+          } catch { return null; }
+        } : undefined,
         inspectImage: pipelineDeps.multimodalIntelligence?.inspect ? (businessId, req) => pipelineDeps!.multimodalIntelligence!.inspect!({ businessId, prompt: req.prompt, mimeType: req.mimeType, dataUrl: req.dataUrl, ...(req.excludeModels ? { excludeModels: req.excludeModels } : {}), ...(req.references ? { references: req.references } : {}) }) : undefined });
       const engine = dossierEngine;
       // Business-scoped chat. It calls the same free-routed AI Workforce as the dossier stages (no new provider, no paid fallback) and only when mission execution is enabled.
