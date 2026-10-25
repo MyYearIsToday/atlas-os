@@ -995,6 +995,12 @@ export class DossierEngine {
   }
 
   /** A mission proposed from a chat: Approval Required, never auto-run, de-duplicated by a stable key. Returns the existing one if already created. */
+  /** Bytes of an operator-confirmed image as a data URL, for approved reuse in prototypes. Never throws. */
+  async imageDataUrl(businessId: string, imageId: string): Promise<{ ok: true; dataUrl: string; chars: number } | { ok: false }> {
+    const img = this.get(businessId)?.images?.find((i) => i.id === imageId); if (!img) return { ok: false };
+    try { const g = await this.retrieveImage(img); return g.ok ? { ok: true, dataUrl: g.dataUrl, chars: g.dataUrlChars } : { ok: false }; } catch { return { ok: false }; }
+  }
+
   /** Operator-initiated strategy actions: approve a recommendation, create linked brief/content/creative missions (Approval Required), record real results. Internal only. */
   async executionAction(businessId: string, body: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
     const x = this.get(businessId); const b = this.d.store.businesses.get(businessId);

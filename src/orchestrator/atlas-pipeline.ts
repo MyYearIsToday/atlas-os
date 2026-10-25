@@ -94,6 +94,8 @@ export class PipelineStore {
   readonly missionOutputs: ObservedMap<MissionOutput>;
   /** Staged research dossiers (work product, never evidence), one per authorised business. */
   readonly dossiers: ObservedMap<Dossier>;
+  /** Generated website prototypes (work product, never evidence). */
+  readonly prototypes: ObservedMap<import("./prototype-types").Prototype>;
   readonly trace: PipelineTraceEntry[] = [];
   /** Businesses that have entered the pipeline; a re-discovery must not spawn duplicate audits or missions. */
   readonly started: ObservedSet;
@@ -109,6 +111,7 @@ export class PipelineStore {
     this.audits = bind("audit");
     this.missionOutputs = bind("mission_output");
     this.dossiers = bind("dossier");
+    this.prototypes = bind("prototype");
     this.started = new ObservedSet((id) => persistence?.put("started", id, { id }));
   }
 
@@ -126,7 +129,7 @@ export class PipelineStore {
     const counts = {
       businesses: await fill("business", this.businesses), evidence: await fill("evidence", this.evidence), observations: await fill("observations", this.observations),
       multimodalObservations: await fill("multimodal_observations", this.multimodalObservations),
-      scores: await fill("score", this.scores), audits: await fill("audit", this.audits), missionOutputs: await fill("mission_output", this.missionOutputs), dossiers: await fill("dossier", this.dossiers),
+      scores: await fill("score", this.scores), audits: await fill("audit", this.audits), missionOutputs: await fill("mission_output", this.missionOutputs), dossiers: await fill("dossier", this.dossiers), prototypes: await fill("prototype", this.prototypes),
       started: 0, trace: 0,
     };
     (await p.loadAll("started")).forEach((r) => { this.started.restore(r.id); counts.started++; });
