@@ -25,7 +25,7 @@ import { ApprovalService } from "../src/services/autonomy/approvals";
 import { AutonomyScheduler, createInternalExecutor, runAutonomyCycle } from "../src/services/autonomy/loop";
 import { readAutonomy, type AutonomyRuntime } from "../src/services/autonomy/observability";
 import { defaultAutonomyPolicy } from "../src/services/autonomy/policy";
-import { MissionRunner } from "../src/orchestrator/mission-runner";
+import { MissionRunner, describeRouting } from "../src/orchestrator/mission-runner";
 import { AutonomousWorkforce } from "../src/orchestrator/autonomous-workforce";
 import { ProviderRegistry } from "../src/workforce/provider-registry";
 import { OperationalLedger } from "../src/services/finance/ledger";
@@ -34,6 +34,7 @@ import { TavilyWebDiscoveryProvider } from "../src/services/web-intelligence/tav
 import { WebDiscoveryError, type WebDiscoveryProvider } from "../src/services/web-intelligence/provider";
 import { MultimodalIntelligenceService } from "../src/services/multimodal-intelligence/service";
 import { buildBusinessView } from "./atlas/business-view";
+import { PrototypeService, inferMissionType, MISSION_TYPE } from "./atlas/prototype";
 import { parseResearchRequest } from "./atlas/research-request";
 import { ProcessController, buildCandidateView, readDossier, readMissionResult, startCandidate, type ActionContext } from "./atlas/scout-actions";
 import { DossierEngine, missionContext } from "./atlas/dossier";
@@ -53,6 +54,7 @@ let discoveryTrigger: (() => Promise<{ ok: boolean; candidatesFound: number; err
 const processController = new ProcessController();
 let dossierEngine: DossierEngine | null = null;
 let chatService: ChatService | null = null;
+let prototypeService: PrototypeService | null = null;
 let atlasPipeline: { deps: PipelineDeps; runner: MissionRunner; ledger: OperationalLedger; executionEnabled: boolean; persistence: AtlasPersistence | null; migrations: number[]; autonomy: AutonomyRuntime } | null = null;
 
 /**
@@ -385,7 +387,7 @@ export function createAiProxyServer(
         return;
       }
 
-      if (url === "/api/scout/candidates" || url === "/api/scout/candidates/start" || url === "/api/scout/research" || url === "/api/atlas/process" || url.startsWith("/api/atlas/dossiers/")) {
+      if (url === "/api/scout/candidates" || url === "/api/scout/candidates/start" || url === "/api/scout/research" || url === "/api/atlas/process" || url.startsWith("/api/atlas/dossiers/") || url.startsWith("/api/atlas/prototypes/")) {
         // Scout visibility, per-business operator authorisation, the staged internal dossier and one bounded on-demand cycle. Internal work only.
         if (!atlasPipeline || !scoutPipeline || !dossierEngine) { sendJson(res, 503, { error: { code: "unavailable", message: "Atlas pipeline or Scout is not running" } }); logRequest(method, url, 503, Date.now() - started); return; }
         const actionCtx: ActionContext = {
@@ -441,6 +443,24 @@ export function createAiProxyServer(
           ({ status, body: payload } = body.action === "rediscover"
             ? (() => { const r = dossierEngine!.rediscover(id); if (r.ok) dossierEngine!.kick(id); return { status: r.ok ? 200 : 409, body: { ok: r.ok, ...(r.reason ? { error: r.reason } : {}) } }; })()
             : await dossierEngine.applyAction(id, body));
+        } else if (/^\/api\/atlas\/(dossiers\/[A-Za-z0-9_-]{1,80}\/prototype|prototypes\/proto_[a-f0-9]{10}(\/(revise|fill|decision))?)$/.test(url)) {
+          // Website prototypes: private, secret-gated like every Atlas route. Files are returned as data; the browser renders them in a sandboxed iframe.
+          if (!prototypeService) { status = 503; payload = { ok: false, error: "unavailable" }; }
+          else {
+            const parts = url.split("/"); const store = atlasPipeline.deps.store;
+            const start = parts[3] === "dossiers";
+            const proto = start ? undefined : prototypeService.get(parts[4]);
+            const bizId = start ? parts[4] : proto?.businessId;
+            const b = bizId ? store.businesses.get(bizId) : undefined; const dossier = bizId ? dossierEngine.get(bizId) : undefined;
+            const body = method === "POST" ? ((await readJsonBody(req)) ?? {}) as Record<string, unknown> : {};
+            if (start && method === "POST") { if (!b || !dossier) { status = 404; payload = { ok: false, error: "no_dossier" }; } else ({ status, body: payload } = await prototypeService.start(b, dossier, body)); }
+            else if (!start && !proto) { status = 404; payload = { ok: false, error: "unknown_prototype" }; }
+            else if (!start && method === "GET" && parts.length === 5) { status = 200; payload = { ok: true, busy: prototypeService.isBusy(proto!.id), prototype: prototypeService.detail(proto!, Number(new URL(req.url ?? "", "http://x").searchParams.get("version")) || undefined) }; }
+            else if (!start && method === "POST" && parts[5] === "revise") { if (!b || !dossier) { status = 404; payload = { ok: false, error: "no_dossier" }; } else ({ status, body: payload } = await prototypeService.revise(b, dossier, proto!.id, body.instruction)); }
+            else if (!start && method === "POST" && parts[5] === "fill") ({ status, body: payload } = await prototypeService.fill(proto!.id, body.key, body.value));
+            else if (!start && method === "POST" && parts[5] === "decision") ({ status, body: payload } = await prototypeService.decide(proto!.id, body.decision, typeof body.actor === "string" && /^[\w.:@ -]{1,60}$/.test(body.actor) ? body.actor : "operator"));
+            else { status = 405; payload = { error: { code: "method_not_allowed", message: "unsupported method" } }; }
+          }
         } else if (method === "POST" && /^\/api\/atlas\/dossiers\/[A-Za-z0-9_-]{1,80}\/execution$/.test(url)) {
           // Strategy decisions, deliverable missions (Approval Required) and operator-entered results. Internal only; nothing is sent or published.
           const id = url.split("/")[4];
@@ -656,7 +676,21 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
         hintsProvider: (task) => dossierEngine?.hintsFor(task.taskId),
         // Approved non-stage missions get the business record, approved-source evidence and prior dossier outputs, not just a title.
         contextProvider: (task) => { if (!task.clientId || String(task.missionType ?? "").startsWith("dossier_") && task.missionType !== "dossier_followup") return undefined; const b = pipelineDeps!.store.businesses.get(task.clientId); return b ? missionContext(b, pipelineDeps!.store.dossiers.get(task.clientId), pipelineDeps!.store) : undefined; } });
-      const runner = new MissionRunner({ workforce, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled,
+      // Website prototypes: the coding employee (task type website_prototype) writes real files; nothing here executes them.
+      prototypeService = new PrototypeService({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, flush: () => persistence?.flush() ?? Promise.resolve(),
+        imageData: (businessId, imageId) => dossierEngine ? dossierEngine.imageDataUrl(businessId, imageId) : Promise.resolve({ ok: false as const }),
+        generate: executionEnabled && providers?.workforce ? async ({ system, prompt, excludeModels }) => {
+          try {
+            const r = await providers!.workforce.execute({ workerRole: "writer", taskType: "website_prototype", task: "Generate website prototype files for one business.", priority: 2, confidenceTarget: 0.5, budgetLimitUsd: 0.25, maxTokens: 14000, temperature: 0.4, timeoutMs: 170_000, lineageId: "atlas-website-prototype", ...(excludeModels?.length ? { excludeModels } : {}), messages: [{ role: "system", content: system }, { role: "user", content: prompt }] });
+            if (r.failed) return { ok: false as const, reason: `${r.code}: ${String(r.reason ?? "").slice(0, 200)}` };
+            const d = describeRouting(r, "website_prototype");
+            return { ok: true as const, text: r.text, provider: r.provider, model: r.model, routing: d.record, label: d.label };
+          } catch { return { ok: false as const, reason: "provider error" }; }
+        } : undefined });
+      const protoSvc = prototypeService;
+      const runner = new MissionRunner({ workforce,
+        implementationTypes: (task) => inferMissionType(task) === MISSION_TYPE,
+        implementationHandler: async (task) => { const b = task.clientId ? pipelineDeps!.store.businesses.get(task.clientId) : undefined; const d = b ? dossierEngine?.get(b.id) : undefined; if (!b || !d) return { outcome: "BLOCKED" as const, reason: "no dossier exists for this business yet; start work on it first" }; return protoSvc.startForTask(b, d, task); }, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled,
         afterRun: () => persistence?.flush() ?? Promise.resolve(),
         blockedBy: (task) => { const d = task.clientId ? pipelineDeps!.store.dossiers.get(task.clientId) : undefined; return d && d.status === "awaiting_sources" && !String(task.missionType ?? "").startsWith("dossier_") ? "Blocked: approve this business's research sources first" : null; } });
       pipelineDeps.onMissionCreated = (task) => runner.autoExecute(task);

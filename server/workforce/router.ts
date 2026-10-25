@@ -44,6 +44,7 @@ const TASK_MAP: Record<string, EmployeeId> = {
   tool_coordination: "ceo_master_planner",
   quick_response: "fast_worker",
   coding: "coding_engineer",
+  website_prototype: "coding_engineer",
   writing: "writer",
   routing: "mission_router",
   image: "vision_employee",

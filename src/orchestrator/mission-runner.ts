@@ -37,6 +37,13 @@ export interface MissionRunnerOptions {
   blockedBy?: (task: Task) => string | null;
   /** Called after a run settles (success or failure), including runs that outlive the HTTP request. */
   afterRun?: () => Promise<void>;
+  /**
+   * Implementation missions (website prototypes) are not text answers. When present, such a mission is handed to this handler,
+   * which stores real files and sets the mission status itself. Without it the mission is blocked, never "completed" by prose.
+   */
+  implementationHandler?: (task: Task) => Promise<{ outcome: "RUNNING" | "BLOCKED" | "FAILED"; reason?: string }>;
+  /** Mission types that need the implementationHandler. */
+  implementationTypes?: (task: Task) => boolean;
 }
 
 export interface MissionRunSummary {
@@ -116,6 +123,16 @@ export class MissionRunner {
     }
     if (mode.autonomous && (task.approvalRequired !== "Auto" || !task.missionType || !AUTONOMOUS_SAFE_MISSION_TYPES.has(task.missionType))) {
       return { taskId, executed: false, outcome: "BLOCKED", reason: "mission is not eligible for autonomous execution" };
+    }
+    if (this.options.implementationTypes?.(task)) {
+      if (task.approvalRequired !== "Auto" && !approval.approvedByHuman && !approval.approvedByCeo) return { taskId, executed: false, outcome: "BLOCKED", reason: `waiting for human approval (${task.approvalRequired})` };
+      if (!this.options.implementationHandler || !this.options.executionEnabled) {
+        store.record({ stage: "execution", event: "MissionExecution", businessId: task.clientId, handler: "mission-runner", state: "refused: implementation mission needs website generation, which is not enabled", error: "implementation handler unavailable" });
+        return { taskId, executed: false, outcome: "BLOCKED", reason: "This mission needs website generation, which is not enabled on this server. It was not run and was not marked complete." };
+      }
+      const r = await this.options.implementationHandler(task);
+      store.record({ stage: "execution", event: "MissionExecution", businessId: task.clientId, handler: "prototype-service", state: r.outcome.toLowerCase(), ...(r.reason ? { error: r.reason } : {}) });
+      return { taskId, executed: false, outcome: r.outcome === "RUNNING" ? "RUNNING" : r.outcome, ...(r.reason ? { reason: r.reason } : {}) };
     }
     const blocker = this.options.blockedBy?.(task);
     if (blocker) {

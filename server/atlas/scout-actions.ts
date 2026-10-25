@@ -96,12 +96,13 @@ export function buildCandidateView(ctx: CandidateContext) {
 }
 
 /** Full persisted dossier for one business (structured outputs, sources, follow-ups), for the business record view. */
+import { prototypeSummary } from "./prototype";
 import { buildComparison, buildTrace, learningSummary, strategies } from "./strategy";
 export function readDossier(deps: PipelineDeps, businessId: string) {
   const d = deps.store.dossiers.get(businessId);
   if (!d) return null;
   const tasks = deps.missionQueue.getSnapshot();
-  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, inspection: d.inspection ?? null, strategies: strategies(d), comparison: buildComparison({ canonicalName: deps.store.businesses.get(businessId)?.canonicalName ?? businessId }, d), trace: buildTrace(d, tasks), execution: d.execution ?? { strategies: [], deliverables: [], performance: [] }, learning: learningSummary(d), identity: d.identity ?? null, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, evidenceLevel: evidenceLevel({ ...s, pageText } as typeof d.sources[number]), decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, competitorApproval: d.competitorApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
+  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, inspection: d.inspection ?? null, strategies: strategies(d), comparison: buildComparison({ canonicalName: deps.store.businesses.get(businessId)?.canonicalName ?? businessId }, d), trace: buildTrace(d, tasks), execution: d.execution ?? { strategies: [], deliverables: [], performance: [] }, learning: learningSummary(d), prototypes: [...deps.store.prototypes.values()].filter((p) => p.businessId === businessId).map((p) => prototypeSummary(p, tasks)), identity: d.identity ?? null, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, evidenceLevel: evidenceLevel({ ...s, pageText } as typeof d.sources[number]), decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, competitorApproval: d.competitorApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
 }
 
 // ---------------------------------------------------------------- start one business
