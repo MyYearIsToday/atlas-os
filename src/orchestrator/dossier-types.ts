@@ -1,5 +1,5 @@
 /** Persisted per-business dossier: staged internal research -> audit -> SWOT -> growth -> action plan. Work product only; never evidence. */
-export type StageId = "research" | "profile" | "audit" | "competitor_discovery" | "competitors" | "market" | "swot" | "growth" | "campaign" | "plan";
+export type StageId = "research" | "profile" | "audit" | "competitor_discovery" | "competitors" | "market" | "swot" | "growth" | "pr" | "campaign" | "plan";
 export type StageStatus = "pending" | "running" | "completed" | "failed" | "blocked";
 
 /** One attempt to get a usable structured output for an AI stage. Every attempt is kept, failed ones included. */
@@ -34,6 +34,10 @@ export interface StageRecord {
   lastAttemptAt: string | null;
   error: string | null;
   generatedBy: string | null;
+  /** Earlier outputs of this stage, kept when it was revised. */
+  history?: Array<{ at: string; reason: string; output: unknown }>;
+  /** Set when the stage was built on a section that was later revised and has not been re-run. */
+  staleBecause?: string;
   output: unknown | null;
   recovery?: StageRecovery;
 }
@@ -191,4 +195,66 @@ export interface Dossier {
   inspection?: { website?: WebsiteInspection; social: SocialObservation[]; conflicts: string[]; loop?: ResearchLoopTrace; /** Count-based heuristic (pages/profiles read, sources validated). It rates how much evidence was gathered, not how good it is. */ quality?: { level: "sufficient" | "thin" | "insufficient"; reasons: string[]; assessedAt: string } };
   /** Entity identity established by the profile stage and used by every later stage. */
   identity?: { entityType: string; distinctFrom: string[] };
+  /** Planner decisions, newest last. */
+  planLog?: PlanChange[];
+  /** Stages sent back for revision. The earlier output is preserved; pending means the redo has not finished. */
+  revisions?: Partial<Record<StageId, { reason: string; at: string; count: number; pending: boolean; previous: unknown }>>;
+  /** Question-driven investigations Atlas actually ran. */
+  investigations?: Investigation[];
+  /** Operator or chat challenges recorded for the planner. */
+  handoffs?: Handoff[];
+  /** Earlier versions kept when the business was researched again. */
+  history?: DossierVersion[];
+  researchRound?: number;
+}
+
+export interface Handoff {
+  id: string;
+  from: StageId | "chat";
+  fromEmployee?: string;
+  kind: "needs_evidence" | "challenge" | "alternative_direction";
+  detail: string;
+  sourceRefs: string[];
+  at: string;
+  status: "open" | "investigated" | "considered";
+  resolvedBy?: StageId | "planner";
+  resolution?: string;
+}
+export interface Investigation {
+  id: string;
+  question: string;
+  origin: "handoff" | "chat" | "operator";
+  at: string;
+  retrieved: Array<{ id: string; url: string; read: boolean; decision: string }>;
+  notes: string[];
+  steps?: InvestigationStep[];
+  stopReason?: "enough" | "budget" | "no_progress" | "planner_unavailable" | "nothing_to_do";
+  concluded?: boolean;
+  finding?: string;
+}
+export interface InvestigationStep { action: "search" | "read" | "stop"; target?: string; why: string; newSources: number }
+
+/** One planner decision: what changed, what was kept, what was revised, what was added. */
+export interface PlanChange {
+  id: string;
+  at: string;
+  trigger: { kind: "handoff" | "chat" | "operator"; ids: string[]; summary: string };
+  decision: "continue" | "revise" | "add_tasks" | "revise_and_add";
+  reason: string;
+  kept: StageId[];
+  revised: StageId[];
+  stale: StageId[];
+  tasks: PlannedTask[];
+  /** False when no planner model was available. */
+  plannerModel: boolean;
+}
+export interface PlannedTask {
+  id: string; taskId?: string; title: string; assignedAI: string; why: string; at: string;
+  status: "completed" | "failed" | "skipped";
+  result?: string; error?: string;
+}
+export interface DossierVersion {
+  round: number; archivedAt: string; reason: string;
+  stages: Partial<Record<StageId, unknown>>;
+  sourceDigest: Array<{ id: string; url: string; retrievedAt: string; decision?: string }>;
 }

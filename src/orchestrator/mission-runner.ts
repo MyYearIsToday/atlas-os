@@ -10,6 +10,18 @@ import { INTERNAL_AUDIT_SUMMARY, DOSSIER_MISSION_TYPES } from "./atlas-pipeline"
  * reads Atlas-owned data and has no external side effect, financial commitment, messaging, publishing,
  * purchasing or mutation of an outside system.
  */
+
+/** Minimum shape of a finished deliverable by mission type. Unknown types only need real text. Returns the problem, or null. */
+export function outcomeProblem(missionType: string, text: string): string | null {
+  const paragraphs = text.split(/\n{2,}|\n\s*[-*\d]+[.)]?\s+/).filter((p) => p.trim().length > 20).length;
+  if (missionType === "dossier_replan_task" || missionType === "dossier_followup") {
+    if (text.length < 300) return `the ${missionType.replace("dossier_", "").replace("_", " ")} output is too short (${text.length} characters) to be a finished work product`;
+    if (paragraphs < 2) return "the output is a single block with no structure (no sections or points), so it is not a usable work product";
+    if (/^\s*[{[]/.test(text) && /[}\]]\s*$/.test(text)) return "the output is raw JSON, but this deliverable must be written for a person";
+  }
+  return null;
+}
+
 export const AUTONOMOUS_SAFE_MISSION_TYPES: ReadonlySet<string> = new Set<string>([INTERNAL_AUDIT_SUMMARY, ...DOSSIER_MISSION_TYPES]);
 
 /**
@@ -152,7 +164,14 @@ export class MissionRunner {
     }
 
     const providerResult = result.result && "text" in result.result ? result.result : undefined;
-    if (!providerResult?.text?.trim() || providerResult.text.trim().length < 20) {
+    const produced = providerResult?.text?.trim() ?? "";
+    const thin = outcomeProblem(String(result.task.missionType ?? ""), produced);
+    if (thin && produced.length >= 20) {
+      await missionQueue.update(taskId, { status: "Failed", completedAt: null, lastFailureReason: thin });
+      store.record({ ...base, state: "failed: outcome not met", error: thin });
+      return { taskId, executed: false, outcome: "FAILED", reason: thin };
+    }
+    if (!produced || produced.length < 20) {
       // "Completed" must mean a real output exists. Nothing usable was produced, so the mission is Failed, not Completed.
       const reason = "the provider returned no usable output";
       await missionQueue.update(taskId, { status: "Failed", completedAt: null, lastFailureReason: reason });

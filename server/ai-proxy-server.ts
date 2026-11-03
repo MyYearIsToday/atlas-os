@@ -409,6 +409,12 @@ export function createAiProxyServer(
             if (!pr.ok) { status = 400; payload = { ok: false, error: "invalid_decision", message: pr.message }; }
             else ({ status, body: payload } = await chatService.decideProposal(chatMatch[1], pr.messageId, pr.proposalId, pr.decision));
           } else { status = 405; payload = { error: { code: "method_not_allowed", message: "unsupported method" } }; }
+        } else if (method === "POST" && /^\/api\/atlas\/dossiers\/[A-Za-z0-9_-]{1,80}\/reresearch$/.test(url)) {
+          const id = url.split("/")[4];
+          const body = (await readJsonBody(req)) as { reason?: unknown } | null;
+          const r = await dossierEngine.reresearch(id, typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim() : "operator requested a fresh pass");
+          if (r.ok) { dossierEngine.kick(id); await atlasPipeline.persistence?.flush(); payload = { ok: true, note: "Research is running again. The earlier version is kept in the dossier history." }; }
+          else { status = r.reason === "no dossier" ? 404 : 409; payload = { ok: false, error: "cannot_reresearch", message: r.reason }; }
         } else if (method === "GET" && url === "/api/scout/candidates") {
           payload = { durable: !!atlasPipeline.persistence, discovery: scoutDiscoveryStatus, items: buildCandidateView({ discovered: scoutPipeline.repository.list(), pipeline: { deps: atlasPipeline.deps, autonomy: atlasPipeline.autonomy } }) };
         } else if (method === "POST" && url === "/api/scout/candidates/start") {
@@ -716,6 +722,12 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
         plan: executionEnabled && providers?.workforce ? async (prompt) => {
           try {
             const r = await providers!.workforce.execute({ workerRole: "researcher", taskType: "deep_research", task: "Choose the next research steps for one business. Reply with JSON only.", priority: 2, confidenceTarget: 0.5, budgetLimitUsd: 0.05, maxTokens: 900, temperature: 0.2, timeoutMs: 45_000, lineageId: "atlas-research-plan", messages: [{ role: "user", content: prompt }] });
+            return r.failed ? null : r.text;
+          } catch { return null; }
+        } : undefined,
+        reason: executionEnabled && providers?.workforce ? async (prompt) => {
+          try {
+            const r = await providers!.workforce.execute({ workerRole: "analyst", taskType: "strategy", task: "Plan or direct one business investigation. Reply with JSON only.", priority: 2, confidenceTarget: 0.5, budgetLimitUsd: 0.05, maxTokens: 900, temperature: 0.2, timeoutMs: 45_000, lineageId: "atlas-planner", messages: [{ role: "user", content: prompt }] });
             return r.failed ? null : r.text;
           } catch { return null; }
         } : undefined,

@@ -114,6 +114,8 @@ export const MISSION_TASK_TYPE: Record<string, string> = {
   dossier_campaign: "writing",
   dossier_swot: "business_analysis",
   dossier_growth: "strategy",
+  dossier_pr: "strategy",
+  dossier_replan_task: "business_analysis",
   dossier_plan: "strategy",
   dossier_followup: "research",
   // Implementation work: routed to the coding employee, never to the research employee.

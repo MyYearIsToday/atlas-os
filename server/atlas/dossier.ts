@@ -2,13 +2,15 @@ import { createHash } from "node:crypto";
 import type { PipelineStore } from "../../src/orchestrator/atlas-pipeline";
 import type { BusinessIntelligence } from "../../src/services/evidence/business-intelligence";
 import type { MissionQueueRepository, Task } from "../../src/services/mission-queue";
-import { DEFAULT_IMAGE_RIGHTS, type Dossier, type FollowUpRef, type ImageAssessment, type ImageRef, type SourceRef, type StageId, type StageRecord } from "../../src/orchestrator/dossier-types";
+import { DEFAULT_IMAGE_RIGHTS, type Dossier, type FollowUpRef, type Handoff, type Investigation, type PlanChange, type PlannedTask, type ImageAssessment, type ImageRef, type SourceRef, type StageId, type StageRecord } from "../../src/orchestrator/dossier-types";
 import { recoverJsonObject, validateShape } from "./json-recovery";
 import { decideBusinessSource, decideCompetitorSource, detectIdentityAmbiguity, evidenceLevel, findContactConflicts, industryTokens } from "./source-validation";
 import { buildAssociationPrompt, decideImage, parseAssociation, sniffImage, type BusinessIdentity } from "./image-association";
 import { executeAction } from "./strategy";
 import { runResearchLoop, rankSources, detectRankAmbiguity, DEFAULT_LOOP_LIMITS, type LoopLimits } from "./research-loop";
 import { classifySource, extractImages, hostOf, isOwnSiteHost, htmlMeta, htmlTitle, htmlToText, normalizeUrl, quoteSupported, scoreRelevance, type FetchDoc, type FetchedDoc } from "./source-tools";
+import { investigate as runInvestigation } from "./investigator";
+import { buildReplanPrompt, dependentsOf, MAX_PLAN_CHANGES, parseReplan, planSnapshot, REVISABLE } from "./replan";
 import { inspectWebsite } from "./site-inspection";
 import { contradictsKnownAccount, knownPlatforms, parseSocialProfile, socialContextBlock } from "./social-intel";
 import type { SocialPlatform } from "../../src/services/scout/social-profiles";
@@ -39,6 +41,8 @@ export interface DossierDeps {
   inspectImage?: (businessId: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[]; references?: Array<{ id: string; mimeType: string; dataUrl: string }> }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }>;
   /** Optional model planner for the research loop (free-routed Workforce call). Returns raw text, or null when unavailable. */
   plan?: (prompt: string) => Promise<string | null>;
+  /** Planner/strategist call used for re-planning and question-driven investigation. Falls back to `plan`. */
+  reason?: (prompt: string) => Promise<string | null>;
   /** Research-loop budgets (defaults are conservative). */
   loopLimits?: Partial<LoopLimits>;
   flush?: () => Promise<void>;
@@ -73,7 +77,8 @@ export const STAGES: StageDef[] = [
   { id: "market", missionType: "dossier_market", assignedAI: "builder", title: "Market and audience analysis", dependsOn: ["profile"], softDependsOn: ["competitors"] },
   { id: "swot", missionType: "dossier_swot", assignedAI: "builder", title: "SWOT analysis", dependsOn: ["audit", "market"], softDependsOn: ["competitors"] },
   { id: "growth", missionType: "dossier_growth", assignedAI: "operator", title: "Strategic opportunities and recommendations", dependsOn: ["swot"], softDependsOn: ["competitors"] },
-  { id: "campaign", missionType: "dossier_campaign", assignedAI: "closer", title: "Campaign plan and content drafts", dependsOn: ["growth"] },
+  { id: "pr", missionType: "dossier_pr", assignedAI: "closer", title: "PR intelligence and strategy", dependsOn: ["growth"] },
+  { id: "campaign", missionType: "dossier_campaign", assignedAI: "closer", title: "Campaign plan and content drafts", dependsOn: ["growth"], softDependsOn: ["pr"] },
   { id: "plan", missionType: "dossier_plan", assignedAI: "operator", title: "Action plan and follow-ups", dependsOn: ["campaign"] },
 ];
 const stageDef = (id: StageId) => STAGES.find((s) => s.id === id)!;
@@ -206,6 +211,26 @@ function normaliseStageOutput(stage: StageId, o: Record<string, unknown>, eviden
       if (!out.audience.length && !out.trends.length && !out.opportunities.length && !out.unknowns.length) throw new Error("market analysis is empty");
       return out;
     }
+    case "pr": {
+      const narrative = clip(o.narrative, 700);
+      if (!narrative) throw new Error("PR strategy has no narrative");
+      const arr = (v: unknown, n: number) => (Array.isArray(v) ? v.slice(0, n) : []) as Array<Record<string, unknown>>;
+      const refsOf = (v: unknown) => (Array.isArray(v) ? v : []).map(String).filter((r) => validRefs.refs.has(r));
+      const out = {
+        narrative, positioning: clip(o.positioning, 400),
+        reputation: items([o.reputation ? (typeof o.reputation === "object" ? o.reputation : { text: o.reputation }) : null].filter(Boolean), validRefs, 1)[0] ?? null,
+        newsworthy: arr(o.newsworthy, 5).map((n) => ({ angle: clip(n?.angle, 240), whyNewsworthy: clip(n?.whyNewsworthy, 300), timing: clip(n?.timing, 120), basis: ["verified", "inference", "hypothesis"].includes(String(n?.basis)) ? String(n?.basis) : "hypothesis", sourceRefs: refsOf(n?.sourceRefs) })).filter((n) => n.angle && n.whyNewsworthy),
+        stakeholders: arr(o.stakeholders, 8).map((n) => ({ group: clip(n?.group, 120), interest: clip(n?.interest, 240), approach: clip(n?.approach, 240) })).filter((n) => n.group),
+        mediaOpportunities: arr(o.mediaOpportunities, 6).map((n) => ({ outletType: clip(n?.outletType, 120), angle: clip(n?.angle, 240), rationale: clip(n?.rationale, 300) })).filter((n) => n.outletType && n.angle),
+        pressReleaseConcepts: arr(o.pressReleaseConcepts, 3).map((n) => ({ headline: clip(n?.headline, 160), keyMessages: strs(n?.keyMessages, 4, 200), whyNow: clip(n?.whyNow, 240) })).filter((n) => n.headline),
+        pitches: arr(o.pitches, 3).map((n) => ({ audience: clip(n?.audience, 120), pitch: clip(n?.pitch, 700) })).filter((n) => n.pitch),
+        thoughtLeadership: arr(o.thoughtLeadership, 4).map((n) => ({ topic: clip(n?.topic, 200), spokespersonRole: clip(n?.spokespersonRole, 100), format: clip(n?.format, 80) })).filter((n) => n.topic),
+        reputationRisks: arr(o.reputationRisks, 5).map((n) => ({ risk: clip(n?.risk, 240), basis: ["verified", "inference", "hypothesis"].includes(String(n?.basis)) ? String(n?.basis) : "hypothesis", sourceRefs: refsOf(n?.sourceRefs), mitigation: clip(n?.mitigation, 240) })).filter((n) => n.risk),
+        crisisReadiness: clip(o.crisisReadiness, 500), unknowns: strs(o.unknowns, 8, 240),
+      };
+      if (!out.newsworthy.length && !out.mediaOpportunities.length && !out.pressReleaseConcepts.length) throw new Error("quality: the PR strategy names no newsworthy angle, media opportunity or press release concept");
+      return out;
+    }
     case "campaign": {
       const list = (v: unknown, n: number) => (Array.isArray(v) ? v.slice(0, n) : []) as Array<Record<string, unknown>>;
       const campaigns = list(o.campaigns, 4).map((c) => { const name = clip(c?.name, 120); if (!name) return null; return { name, objective: clip(c?.objective, 300), audience: clip(c?.audience, 200), message: clip(c?.message, 400), callToAction: clip(c?.callToAction, 160), channels: strs(c?.channels, 5, 60), kpis: list(c?.kpis, 5).map((k) => ({ metric: clip(k?.metric, 120), measurement: clip(k?.measurement, 240), baseline: clip(k?.baseline, 200) || "unknown: establish before the campaign", target: "configurable by the operator" })).filter((k) => k.metric), addresses: strs(c?.addresses, 4, 160), dependencies: strs(c?.dependencies, 5, 160), assumptions: strs(c?.assumptions, 5, 160), risks: strs(c?.risks, 5, 160), basis: ["verified", "hypothesis"].includes(String(c?.basis)) ? "hypothesis" : "hypothesis", sourceRefs: (Array.isArray(c?.sourceRefs) ? c.sourceRefs : []).map(String).filter((r) => validRefs.refs.has(r)) }; }).filter(Boolean);
@@ -235,9 +260,10 @@ const SPEC: Record<Exclude<StageId, "research" | "competitor_discovery">, string
   audit: `JSON keys: summary(string), strengths[], weaknesses[], gaps[], improvementOpportunities[] where each item is {text,basis,sourceRefs[string],quote}. Cover positioning, website and search visibility, social presence, reputation, content and partnerships ONLY as far as the approved sources show; for each area with no evidence write an "unknown" item stating what is missing. Include the visual brand assets section below if any were confirmed.`,
   competitors: `JSON keys: shortlist[{name,url,type:"direct|indirect",whySelected,sourceRefs[string],positioning,offerings[string],pricing,strengths[],weaknesses[],digitalPresence,reputation}] where positioning/pricing/digitalPresence/reputation and each strength/weakness are {text,basis,sourceRefs[string],quote}, whitespace[], threats[] (items), gaps[string] (what could NOT be established for each competitor: say "not found in the approved sources", never "does not exist"), conflicts[string] (conflicting evidence, kept visible), method(string: how competitors were chosen). ONLY competitors present in the APPROVED COMPETITOR SOURCES may appear, each citing their source ids. Pricing only if a source states it; otherwise omit and list it under gaps. Direct = same offer for the same customers; indirect = different offer serving the same need.`,
   market: `JSON keys: audience[], localContext[], trends[], threats[], barriers[] (items {text,basis,sourceRefs[string],quote}), opportunities[{title,rationale,constraints,basis,sourceRefs[string],quote}], estimates[{description,method,uncertainty,sourceRefs[string]}] (ONLY if an approved source supports it; otherwise an empty array), unknowns[string]. Consider Ghana-specific context (locations, mobile-first and social-led discovery, realistic budgets, businesses with limited digital infrastructure) only where the sources or the business record support it; never rely on stereotypes. No market sizes, demographics or prices unless a source states them.`,
-  campaign: `JSON keys: objective(string), pillars[{name,rationale}], channels[{channel,why,constraints}] (match the business's apparent resources and digital maturity), campaigns[{name,addresses[string] (the EXACT titles of the growth recommendations this campaign puts into practice; use only titles listed in the growth context),objective,audience,message,callToAction,channels[string],kpis[{metric,measurement,baseline}],dependencies[string],assumptions[string],risks[string],sourceRefs[string]}] (max 4), sequence[{activity,dependsOn}] (order by dependency, NO calendar dates), content[{campaign,platform,format,draft,callToAction,creativeBrief}] (internal drafts only, specific to this business and its evidence, no invented offers, prices, awards or testimonials), assumptions[string]. Baselines are "unknown" unless a source gives them; targets are set later by the operator.`,
+  campaign: `JSON keys: objective(string), pillars[{name,rationale}], channels[{channel,why,constraints}] (match the business's apparent resources and digital maturity), campaigns[{name,addresses[string] (the EXACT titles of the growth recommendations this campaign puts into practice; use only titles listed in the growth context),objective,audience,message,callToAction,channels[string],kpis[{metric,measurement,baseline}],dependencies[string],assumptions[string],risks[string],sourceRefs[string]}] (max 4), sequence[{activity,dependsOn}] (order by dependency, NO calendar dates), content[{campaign,platform,format,draft,callToAction,creativeBrief}] (internal drafts only, specific to this business and its evidence, no invented offers, prices, awards or testimonials), assumptions[string]. Earned-media and reputation work comes from the PR strategy above: build on it, do not repeat it. Baselines are "unknown" unless a source gives them; targets are set later by the operator.`,
   swot: `JSON keys: strengths[], weaknesses[], opportunities[], threats[] where each item is {text,basis,sourceRefs[string],quote}. Separate verified findings from hypotheses and list unknowns as basis "unknown". Threats and competitors must be specific to this business's evidence, never generic.`,
   growth: `JSON key: recommendations[{title,area:"positioning|visibility|content|social|reputation|acquisition",kind:"finding-based|experiment",currentSituation,rationale,priority:"high|medium|low",effort,intendedOutcome,successMetric,dependencies[string],risks[string],nextSteps[string],basis,sourceRefs[string],quote}]. Use the competitor and market analysis above. First state currentSituation from approved sources; do not default to "build a website / improve SEO / post more" without checking what already exists. Mark kind "experiment" for proposals that test a hypothesis. successMetric must be measurable but must not contain invented baseline numbers.`,
+  pr: `You are the agency's PR strategist. Produce PR intelligence for THIS business from the evidence: not generic advice. JSON keys: narrative(the public story, grounded in sources), positioning(how the business should be framed publicly and why), reputation{text,basis,sourceRefs[string],quote} (what the evidence shows about how it is perceived; if nothing is readable say unknown), newsworthy[{angle,whyNewsworthy,timing,basis:"verified|inference|hypothesis",sourceRefs[string]}] (genuine news hooks only: history, products, milestones, community role, partnerships, industry shifts; none if the evidence shows none), stakeholders[{group,interest,approach}], mediaOpportunities[{outletType,angle,rationale}] (types of outlet or programme, never invented named journalists or outlets that were not found), pressReleaseConcepts[{headline,keyMessages[string],whyNow}], pitches[{audience,pitch}] (draft only, 2-3 sentences each), thoughtLeadership[{topic,spokespersonRole,format}], reputationRisks[{risk,basis,sourceRefs[string],mitigation}], crisisReadiness(what to prepare, without inventing incidents), unknowns[string]. Use the growth recommendations; do not repeat them. Nothing is sent or published.`,
   plan: `JSON keys: dossierSummary(string, <=6 sentences), actionPlan[{title,description,owner,timeframe,dependencies[string],assumptions[string]}], followUps[{title,description,assignedAI:"scout|builder|operator|closer",external:boolean}] (max ${MAX_FOLLOW_UPS}; set external:true for anything that would contact, publish or spend), limitations[string] (missing data, unavailable sources). Timeframes must be tied to scope and dependencies and state assumptions; otherwise use "unspecified". No arbitrary dates.`,
 };
 
@@ -276,8 +302,13 @@ export function contextBlock(b: BusinessIntelligence, d: Dossier, store: Pipelin
   const prior = STAGES.filter((s) => s.id !== "research" && s.id !== "competitor_discovery" && STAGES.findIndex((x) => x.id === s.id) < STAGES.findIndex((x) => x.id === upTo) && d.stages[s.id].output)
     .map((s) => `## ${s.title} (already produced)\n${clip(JSON.stringify(d.stages[s.id].output), 3500)}`).join("\n\n");
   const comp0 = d.stages.competitors;
-  const unavailable = ["market", "swot", "growth", "campaign", "plan"].includes(upTo) && comp0.status === "blocked" ? `\n\n--- COMPETITOR ANALYSIS: NOT AVAILABLE ---\nIt could not be produced (${comp0.error ?? "gave up after repeated attempts"}). Say that competitors are not established; do not invent them.` : "";
-  return [`--- BUSINESS RECORD ---\n${record}`, `--- OBSERVED EVIDENCE (collected by Atlas) ---\n${observed}`, `--- IDENTITY AND INSPECTION LEDGER ---\n${evidenceLedger(b, d)}`, `--- OPPORTUNITY SCORE ---\n${score ? (score.overallScore === null ? "withheld: not enough observed evidence (do not estimate one)" : String(score.overallScore)) : "not calculated"}`, `--- APPROVED SOURCES (validated automatically for this business, or approved by the operator; the only citable sources) ---\n${sources}`, ...(comp && !["profile", "audit"].includes(upTo) ? [`--- APPROVED COMPETITOR SOURCES (validated automatically or approved by the operator; other businesses, never attribute their facts to this business) ---\n${comp}`] : []), ...(visual ? [`--- VISUAL OBSERVATIONS FROM IMAGES JUDGED TO BE THIS BUSINESS'S (AI readings: unverified hypotheses, never verified facts and never citable as evidence; do not assume any image may be reused in published marketing) ---\n${visual}`] : []), ...(prior ? [`--- PRIOR STAGES ---\n${prior}`] : []), `--- LIMITATIONS SO FAR ---\n${d.limitations.join("; ") || "none recorded"}`].join("\n\n") + unavailable;
+  const unavailable = ["market", "swot", "growth", "pr", "campaign", "plan"].includes(upTo) && comp0.status === "blocked" ? `\n\n--- COMPETITOR ANALYSIS: NOT AVAILABLE ---\nIt could not be produced (${comp0.error ?? "gave up after repeated attempts"}). Say that competitors are not established; do not invent them.` : "";
+  const rv = d.revisions?.[upTo];
+  const revised = rv?.pending && rv.previous ? `\n\n--- REVISION REQUESTED (${rv.reason}) ---\nYour earlier version of this section is below. Keep what still holds, change or withdraw what the new information undermines, and state what changed and why.\n${clip(JSON.stringify(rv.previous), 3500)}` : "";
+  const prev = upTo === "pr" && d.history?.length ? (() => { const h = d.history[d.history.length - 1]; return `\n\n--- PREVIOUS VERSION OF THIS DOSSIER (round ${h.round}, archived ${h.archivedAt.slice(0, 10)}; use it to report what CHANGED, never as current fact) ---\n${clip(JSON.stringify({ profile: h.stages.profile, swot: h.stages.swot, growth: h.stages.growth, pr: h.stages.pr }), 3000)}\nSources then: ${h.sourceDigest.length}; now: ${d.sources.filter((u) => u.role !== "competitor").length}.`; })() : "";
+  const tasks = (d.planLog ?? []).flatMap((c) => c.tasks).filter((t) => t.status === "completed" && t.result);
+  const planned = tasks.length ? `\n\n--- SPECIALIST WORK ADDED BY THE PLANNER (internal analysis, real task output; treat as a colleague's notes, not as evidence) ---\n${tasks.slice(-3).map((t) => `[${t.assignedAI}] ${t.title}: ${clip(t.result, 1200)}`).join("\n")}` : "";
+  return [`--- BUSINESS RECORD ---\n${record}`, `--- OBSERVED EVIDENCE (collected by Atlas) ---\n${observed}`, `--- IDENTITY AND INSPECTION LEDGER ---\n${evidenceLedger(b, d)}`, `--- OPPORTUNITY SCORE ---\n${score ? (score.overallScore === null ? "withheld: not enough observed evidence (do not estimate one)" : String(score.overallScore)) : "not calculated"}`, `--- APPROVED SOURCES (validated automatically for this business, or approved by the operator; the only citable sources) ---\n${sources}`, ...(comp && !["profile", "audit"].includes(upTo) ? [`--- APPROVED COMPETITOR SOURCES (validated automatically or approved by the operator; other businesses, never attribute their facts to this business) ---\n${comp}`] : []), ...(visual ? [`--- VISUAL OBSERVATIONS FROM IMAGES JUDGED TO BE THIS BUSINESS'S (AI readings: unverified hypotheses, never verified facts and never citable as evidence; do not assume any image may be reused in published marketing) ---\n${visual}`] : []), ...(prior ? [`--- PRIOR STAGES ---\n${prior}`] : []), `--- LIMITATIONS SO FAR ---\n${d.limitations.join("; ") || "none recorded"}`].join("\n\n") + unavailable + planned + prev + revised;
 }
 
 /** Read-only context handed to approved non-stage missions: the same approved-source evidence the dossier stages use. */
@@ -384,6 +415,7 @@ export class DossierEngine {
       if (!s) break;
       tried.add(s.id);
       await this.runStage(b, x, s);
+      { const cur = this.get(businessId); if (cur) for (const k of [...tried]) if (cur.stages[k].status === "pending") tried.delete(k); }
     }
     const x = this.get(businessId);
     if (!x) return;
@@ -936,6 +968,8 @@ export class DossierEngine {
       rec.attempts.push({ ...base, outcome: parsed.repairs.length ? "repaired" : "valid", repairs: parsed.repairs });
       rec.final = parsed.repairs.length ? "repaired" : "valid"; delete rec.avoidModels;
       st.output = parsed.output; st.generatedBy = out.generatedBy; st.status = "completed"; st.completedAt = this.now(); st.error = null;
+      if (x.revisions?.[s.id]?.pending) x.revisions[s.id]!.pending = false;
+      st.staleBecause = undefined;
       if (parsed.repairs.length) x.limitations.push(`${s.title}: the model's JSON needed mechanical repair (${parsed.repairs.join(", ")}); content was validated after repair.`);
       if (rec.attempts.length - round > 1) x.limitations.push(`${s.title}: needed ${rec.attempts.length - round} attempts to get usable output (${rec.attempts.slice(round, -1).map((a) => `${a.model ?? "unknown model"}: ${a.validationError}`).join("; ")}).`);
       if (s.id === "profile") x.identity = { entityType: String(parsed.output.entityType ?? "unknown"), distinctFrom: (parsed.output.distinctFrom as string[]) ?? [] };
@@ -1026,6 +1060,122 @@ export class DossierEngine {
     x.followUps.push({ key, taskId: task.taskId, title: f.title, assignedAI: f.assignedAI, external: f.external } satisfies FollowUpRef);
     this.save(x); await this.d.flush?.();
     return { taskId: task.taskId };
+  }
+
+  private static readonly INVESTIGATION_BUDGET = 4;
+
+  /** Sends a completed section back for revision. Its earlier output is preserved; sections built on it are flagged, not blindly re-run. */
+  private reviseStage(x: Dossier, id: StageId, reason: string): boolean {
+    const st = x.stages[id];
+    if (!st || st.status !== "completed" || !REVISABLE.has(id)) return false;
+    const rv = (x.revisions ??= {});
+    if ((rv[id]?.count ?? 0) >= 1) return false;
+    (st.history ??= []).push({ at: this.now(), reason: clip(reason, 400), output: st.output });
+    if (st.history.length > 3) st.history.shift();
+    rv[id] = { reason: clip(reason, 400), at: this.now(), count: (rv[id]?.count ?? 0) + 1, pending: true, previous: st.output };
+    const rec = (st.recovery ??= { attempts: [], final: null }); rec.round = rec.attempts.length; rec.final = null;
+    st.status = "pending"; st.taskId = null; st.attempts = 0; st.error = null; st.completedAt = null; st.staleBecause = undefined;
+    if (x.status === "completed") x.status = "active";
+    return true;
+  }
+
+  /**
+   * The planner evaluates a discovery. It may keep the plan, revise specific completed sections, and add specialist tasks.
+   * Code enforces the limits. Never throws. Nothing here publishes, contacts anyone, or spends.
+   */
+  async replan(businessId: string, trigger: PlanChange["trigger"], exceptStage?: StageId): Promise<PlanChange | null> {
+    try {
+      const x = this.get(businessId); const b = this.d.store.businesses.get(businessId);
+      if (!x || !b) return null;
+      const log = (x.planLog ??= []);
+      if (log.length >= MAX_PLAN_CHANGES) return null;
+      const decide = this.d.reason ?? this.d.plan;
+      const titles = Object.fromEntries(STAGES.map((st) => [st.id, st.title])) as Record<StageId, string>;
+      const base = { id: `P${log.length + 1}`, at: this.now(), trigger: { ...trigger, summary: clip(trigger.summary, 600) }, kept: [] as StageId[], revised: [] as StageId[], stale: [] as StageId[], tasks: [] as PlannedTask[], plannerModel: !!decide };
+      let change: PlanChange;
+      const parsed = decide ? parseReplan(await decide(buildReplanPrompt(b.canonicalName, planSnapshot(x, titles), trigger.summary, log)).catch(() => null), x) : null;
+      if (!decide) change = { ...base, decision: "continue", reason: "No planner model is available, so the discovery is recorded but the plan could not be re-evaluated." };
+      else if (!parsed) change = { ...base, decision: "continue", reason: "The planner returned no usable decision; the plan was left unchanged and the discovery stays on record." };
+      else {
+        const revised: StageId[] = [];
+        for (const r of parsed.revise) if (r.stage !== exceptStage && this.reviseStage(x, r.stage, `Planner revision: ${r.note}`)) revised.push(r.stage);
+        const stale = dependentsOf(revised, STAGES, x).filter((id) => !revised.includes(id));
+        for (const id of stale) x.stages[id].staleBecause = clip(`${titles[revised[0]]} was revised: ${parsed.reason}`, 240);
+        const tasks: PlannedTask[] = [];
+        for (const t of parsed.addTasks) tasks.push(await this.runPlannedTask(b, x, t, parsed.reason));
+        change = { ...base, decision: revised.length && tasks.length ? "revise_and_add" : revised.length ? "revise" : tasks.length ? "add_tasks" : "continue", reason: parsed.reason, kept: parsed.keep, revised, stale, tasks };
+      }
+      log.push(change);
+      for (const id of trigger.ids) { const h = (x.handoffs ?? []).find((o) => o.id === id); if (h && h.status === "open") { h.status = "considered"; h.resolvedBy = "planner"; h.resolution = `${change.decision}: ${clip(change.reason, 200)}`; } }
+      this.save(x); await this.d.flush?.();
+      if (change.revised.length) void this.kick(businessId);
+      return change;
+    } catch (e) { console.error(`[atlas-dossier] replan error: ${e instanceof Error ? e.message.slice(0, 160) : "unknown"}`); return null; }
+  }
+
+  /** One extra specialist task the planner chose to add. Internal analysis only; runs through the normal mission runner. */
+  private async runPlannedTask(b: BusinessIntelligence, x: Dossier, t: { title: string; description: string; assignedAI: string }, why: string): Promise<PlannedTask> {
+    const n = (x.planLog ?? []).reduce((c, p) => c + p.tasks.length, 0) + 1;
+    const base = { id: `T${n}`, title: t.title, assignedAI: t.assignedAI, why: clip(why, 240), at: this.now() };
+    try {
+      const task = await this.d.missionQueue.create({
+        title: `Planner task: ${t.title} — ${b.canonicalName}`,
+        description: `${PREAMBLE}\n\nTASK (added by the planner): ${t.title}\n${t.description}\nWhy it was added: ${why}\n\nWrite a substantive internal work product in prose (short headed sections or bullets), not JSON. Keep what is observed (cite source ids like S1), what you infer and what is unknown clearly apart.\n\n${contextBlock(b, x, this.d.store, "plan")}`,
+        assignedAI: t.assignedAI as Task["assignedAI"], clientId: b.id, priority: "Medium", approvalRequired: "Auto", missionType: "dossier_replan_task", dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
+      });
+      const r = await this.d.runner.run(task.taskId, {}, { autonomous: true });
+      if (r.outcome !== "COMPLETED") return { ...base, taskId: task.taskId, status: "failed", error: clip(`${r.outcome}${r.reason ? `: ${r.reason}` : ""}`, 160) };
+      const out = this.d.store.missionOutputs.get(task.taskId);
+      if (!out?.text) return { ...base, taskId: task.taskId, status: "failed", error: "completed without an output" };
+      return { ...base, taskId: task.taskId, status: "completed", result: clip(out.text, 2500) };
+    } catch (e) { return { ...base, status: "failed", error: clip(e instanceof Error ? e.message : e, 160) }; }
+  }
+
+  /** Question-driven investigation (bounded). The model chooses searches and reads; every step is a real retrieval. */
+  async investigate(businessId: string, question: string, origin: Investigation["origin"]): Promise<Investigation | null> {
+    const x = this.get(businessId); const b = this.d.store.businesses.get(businessId);
+    if (!x || !b) return null;
+    const inv = (x.investigations ??= []);
+    if (origin === "chat" ? inv.filter((i) => i.origin === "chat").length >= 10 : inv.filter((i) => i.origin !== "chat").length >= DossierEngine.INVESTIGATION_BUDGET) return null;
+    const out = await runInvestigation(clip(question, 400), {
+      businessName: b.canonicalName, decide: this.d.reason ?? this.d.plan,
+      retrieve: (req) => this.addEvidence(businessId, req),
+      known: () => x.sources.filter((u) => u.role !== "competitor" && u.decision === "approved" && u.pageText).slice(0, 12).map((u) => ({ id: u.id, url: u.url, title: u.title, excerpt: u.pageText ?? "" })),
+    });
+    const rec: Investigation = { id: `V${inv.length + 1}`, question: clip(question, 240), origin, at: this.now(), retrieved: out.retrieved.map((a) => ({ id: a.id, url: a.url, read: a.read, decision: a.decision })), notes: out.notes, steps: out.steps, stopReason: out.stopReason, concluded: out.concluded, ...(out.finding ? { finding: out.finding } : {}) };
+    inv.push(rec); this.save(x); await this.d.flush?.();
+    return rec;
+  }
+
+  /** The operator, in chat, challenges a finding or asks the planner to reconsider. Recorded, then evaluated. */
+  async raiseFromChat(businessId: string, kind: Handoff["kind"], detail: string): Promise<{ handoffId: string; change: PlanChange | null } | null> {
+    const x = this.get(businessId); if (!x) return null;
+    const hand = (x.handoffs ??= []);
+    if (hand.length >= 24) return null;
+    const h: Handoff = { id: `H${hand.length + 1}`, from: "chat", kind, detail: clip(detail, 300), sourceRefs: [], at: this.now(), status: "open" };
+    hand.push(h); this.save(x);
+    const change = await this.replan(businessId, { kind: "chat", ids: [h.id], summary: `In the Ask Atlas conversation the operator raised (${kind.replace("_", " ")}): ${h.detail}` });
+    return { handoffId: h.id, change };
+  }
+
+  /**
+   * Research this business again. Current findings are archived, not deleted. Operator source decisions are kept.
+   * Approval records, deliverables and prototypes are not wiped.
+   */
+  async reresearch(businessId: string, reason: string): Promise<{ ok: boolean; reason?: string }> {
+    const x = this.get(businessId); if (!x) return { ok: false, reason: "no dossier" };
+    if (this.drives.has(businessId) || this.active.has(businessId)) return { ok: false, reason: "research is running now" };
+    if ((x.researchRound ?? 0) >= 5) return { ok: false, reason: "re-research limit reached" };
+    (x.history ??= []).push({ round: x.researchRound ?? 0, archivedAt: this.now(), reason: clip(reason, 200), stages: { profile: x.stages.profile.output, audit: x.stages.audit.output, swot: x.stages.swot.output, growth: x.stages.growth.output, pr: x.stages.pr.output }, sourceDigest: x.sources.filter((u) => u.role !== "competitor").slice(0, 40).map((u) => ({ id: u.id, url: u.url, retrievedAt: u.retrievedAt, ...(u.decision ? { decision: u.decision } : {}) })) });
+    if (x.history.length > 3) x.history.shift();
+    x.researchRound = (x.researchRound ?? 0) + 1;
+    for (const s of STAGES) x.stages[s.id] = emptyStage();
+    for (const src of x.sources) if (src.decidedBy !== "operator" && src.check?.status === "fetched") src.check = { status: "not_checked" };
+    x.revisions = {}; x.status = "active";
+    for (const h of x.handoffs ?? []) if (h.status === "open") { h.status = "considered"; h.resolvedBy = "planner"; h.resolution = "closed when the dossier was researched again"; }
+    x.limitations = [`Researched again (round ${x.researchRound}): ${clip(reason, 120)}. The earlier version is kept in the dossier history.`];
+    this.save(x); await this.d.flush?.();
+    return { ok: true };
   }
 
   /** Follow-up missions are Approval Required, never auto-run, de-duplicated by a stable key. */
