@@ -34,8 +34,8 @@ export interface StageRecord {
   lastAttemptAt: string | null;
   error: string | null;
   generatedBy: string | null;
-  /** Earlier outputs of this stage, kept when it was revised. */
-  history?: Array<{ at: string; reason: string; output: unknown }>;
+  /** Earlier outputs of this stage, kept when it was revised. The canonical copy also lives on the dossier revision log. */
+  history?: Array<{ at: string; reason: string; output: unknown; revisionId?: string }>;
   /** Set when the stage was built on a section that was later revised and has not been re-run. */
   staleBecause?: string;
   output: unknown | null;
@@ -203,8 +203,10 @@ export interface Dossier {
   investigations?: Investigation[];
   /** Operator or chat challenges recorded for the planner. */
   handoffs?: Handoff[];
-  /** Earlier versions kept when the business was researched again. */
+  /** Earlier versions kept when the business was researched again or the plan was revised. Never the only copy of a discarded output. */
   history?: DossierVersion[];
+  /** Per-stage outputs taken before a section was replaced, linked to the plan change that caused it. */
+  revisionLog?: StageRevision[];
   researchRound?: number;
 }
 
@@ -253,8 +255,38 @@ export interface PlannedTask {
   status: "completed" | "failed" | "skipped";
   result?: string; error?: string;
 }
+export interface StageRevision {
+  id: string;
+  stage: StageId;
+  at: string;
+  reason: string;
+  planChangeId?: string;
+  versionId?: string;
+  output: unknown;
+  completedAt: string | null;
+  generatedBy: string | null;
+  sourceRefs: string[];
+}
+/** One archived picture of the analytical dossier. Older records may store a stage output directly; newer ones store an ArchivedStage. */
+export interface ArchivedStage {
+  status: string;
+  output: unknown;
+  completedAt: string | null;
+  generatedBy: string | null;
+  sourceRefs: string[];
+  staleBecause?: string;
+}
 export interface DossierVersion {
-  round: number; archivedAt: string; reason: string;
+  id?: string;
+  round: number;
+  archivedAt: string;
+  reason: string;
+  kind?: "reresearch" | "revision";
+  planChangeId?: string;
+  triggerSummary?: string;
   stages: Partial<Record<StageId, unknown>>;
-  sourceDigest: Array<{ id: string; url: string; retrievedAt: string; decision?: string }>;
+  sourceDigest: Array<{ id: string; url: string; retrievedAt: string; decision?: string; relevance?: string }>;
+  limitations?: string[];
+  planDecisions?: Array<{ id: string; at: string; decision: string; reason: string; revised: StageId[] }>;
+  investigations?: Array<{ id: string; question: string; at: string; finding?: string; stopReason?: string }>;
 }

@@ -1,0 +1,129 @@
+import { useEffect, useState } from 'react';
+import { PageIntro } from '@/components/atlas-shell';
+
+type StageView = { id: string; title: string; status: string; staleBecause?: string | null; priorVersions?: number; error?: string | null };
+type VersionView = { id: string; round: number; archivedAt: string; reason: string; kind: string; planChangeId: string | null; sourceDigest: Array<{ id: string; decision?: string }>; stages: Record<string, { status: string; output: unknown; sourceRefs?: string[] }> };
+type PlanView = { id: string; at: string; decision: string; reason: string; revised: string[]; stale: string[]; tasks: Array<{ title: string; assignedAI: string; status: string; error?: string }> };
+type DossierView = { businessId: string; status: string; researchRound?: number; stages: StageView[]; planLog: PlanView[]; history: VersionView[]; revisionLog: Array<{ id: string; stage: string; at: string; reason: string; planChangeId?: string }>; investigations: Array<{ id: string; question: string; finding?: string; stopReason?: string; retrieved?: Array<{ url: string; decision: string }> }> };
+
+export function DossierHistoryPage() {
+  const [businessId, setBusinessId] = useState(() => new URLSearchParams(window.location.search).get('business') ?? '');
+  const [items, setItems] = useState<Array<{ businessId: string; businessName?: string; dossier?: { status?: string } | null }>>([]);
+  const [dossier, setDossier] = useState<DossierView | null>(null);
+  const [versionId, setVersionId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/scout/candidates').then(async (r) => {
+      if (!r.ok) return;
+      const body = await r.json() as { items?: Array<{ businessId: string; name?: string; dossier?: { status?: string } | null }> };
+      setItems((body.items ?? []).map((item) => ({ businessId: item.businessId, businessName: item.name, dossier: item.dossier })));
+    }).catch(() => undefined);
+  }, []);
+
+  async function load(id: string) {
+    const clean = id.trim();
+    if (!clean) return;
+    setLoading(true); setError(null);
+    try {
+      const r = await fetch(`/api/atlas/dossiers/${encodeURIComponent(clean)}`);
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { setDossier(null); setError((body as { error?: { message?: string } }).error?.message ?? 'No dossier for that business.'); return; }
+      const view = body as DossierView;
+      setDossier(view);
+      setVersionId(view.history?.[0]?.id ?? null);
+    } catch {
+      setError('The dossier service is not reachable from this page.');
+    } finally { setLoading(false); }
+  }
+
+  const version = dossier?.history.find((item) => item.id === versionId) ?? dossier?.history.at(-1) ?? null;
+
+  return (
+    <div>
+      <PageIntro eyebrow="Dossier" title="Research history" description="Earlier profiles, audits, competitor and market analysis, SWOT, growth, PR, campaigns and plans stay attached to the decision that replaced them. Nothing here sends, publishes or spends." />
+      <form className="mb-4 flex max-w-3xl flex-col gap-3 rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4 sm:flex-row" onSubmit={(e) => { e.preventDefault(); void load(businessId); }}>
+        <label className="flex-1 text-[12px] text-[#9aabbf]">Business id
+          <input value={businessId} onChange={(e) => setBusinessId(e.target.value)} className="mt-1 w-full rounded-md border border-[#2a3d55] bg-[#07111f] px-3 py-2 text-[13px] text-white" placeholder="business id" data-testid="input-dossier-business" />
+        </label>
+        <button className="self-end rounded-md bg-[#d4af37] px-4 py-2 text-[13px] font-semibold text-[#0b1f3a]" type="submit" data-testid="button-load-dossier">{loading ? 'Loading' : 'Open dossier'}</button>
+      </form>
+      {items.length > 0 && (
+        <div className="mb-4 flex max-w-3xl flex-wrap gap-2">
+          {items.slice(0, 12).map((item) => (
+            <button key={item.businessId} type="button" className="rounded-md border border-[#2a3d55] px-2 py-1 text-[12px] text-[#d5deea]" onClick={() => { setBusinessId(item.businessId); void load(item.businessId); }}>
+              {item.businessName ?? item.businessId}{item.dossier?.status ? ` · ${item.dossier.status}` : ''}
+            </button>
+          ))}
+        </div>
+      )}
+      {error && <p className="mb-4 text-[13px] text-[#e07a7a]" role="alert">{error}</p>}
+      {dossier && (
+        <div className="grid max-w-6xl gap-4 lg:grid-cols-[280px_1fr]">
+          <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4">
+            <h2 className="text-[13px] font-semibold text-white">Current sections</h2>
+            <p className="mt-1 text-[11px] text-[#89a]">{dossier.status}{dossier.researchRound ? ` · round ${dossier.researchRound}` : ''}</p>
+            <ul className="mt-3 space-y-2">
+              {dossier.stages.map((stage) => (
+                <li key={stage.id} className="text-[12px] text-[#d5deea]">
+                  <span className="text-white">{stage.title}</span>
+                  <span className="mt-0.5 block text-[#89a]">{stage.status}{stage.priorVersions ? ` · ${stage.priorVersions} earlier` : ''}{stage.staleBecause ? ` · stale: ${stage.staleBecause}` : ''}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+          <div className="space-y-4">
+            <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4">
+              <h2 className="text-[13px] font-semibold text-white">Why the plan changed</h2>
+              {(dossier.planLog ?? []).length === 0 && <p className="mt-2 text-[12px] text-[#89a]">No planner revision has been recorded.</p>}
+              <ul className="mt-3 space-y-3">
+                {(dossier.planLog ?? []).map((change) => (
+                  <li key={change.id} className="text-[12px] text-[#d5deea]">
+                    <span className="text-[#d4af37]">{change.decision}</span> {change.reason}
+                    {change.revised.length > 0 && <span className="mt-1 block text-[#89a]">Revised: {change.revised.join(', ')}. Regenerated from that: {change.stale.join(', ') || 'none'}.</span>}
+                    {change.tasks.length > 0 && <span className="mt-1 block text-[#89a]">Specialist work: {change.tasks.map((task) => `${task.title} (${task.assignedAI}, ${task.status}${task.error ? `: ${task.error}` : ''})`).join('; ')}</span>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+            <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4">
+              <h2 className="text-[13px] font-semibold text-white">Archived versions</h2>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {(dossier.history ?? []).map((item) => (
+                  <button key={item.id} type="button" className={`rounded-md border px-2 py-1 text-[12px] ${item.id === version?.id ? 'border-[#d4af37] text-white' : 'border-[#2a3d55] text-[#d5deea]'}`} onClick={() => setVersionId(item.id)}>
+                    {item.kind} · {item.archivedAt.slice(0, 16).replace('T', ' ')}
+                  </button>
+                ))}
+              </div>
+              {version && (
+                <div className="mt-3 text-[12px] text-[#d5deea]">
+                  <p>{version.reason}{version.planChangeId ? ` · plan ${version.planChangeId}` : ''}</p>
+                  <p className="mt-1 text-[#89a]">{version.sourceDigest.length} source references kept with this version.</p>
+                  <ul className="mt-3 space-y-2">
+                    {Object.entries(version.stages).map(([id, stage]) => (
+                      <li key={id}>
+                        <span className="text-white">{id}</span> <span className="text-[#89a]">{stage.status}{stage.sourceRefs?.length ? ` · sources ${stage.sourceRefs.join(', ')}` : ''}</span>
+                        <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded bg-[#07111f] p-2 text-[11px] text-[#c5d0dc]">{JSON.stringify(stage.output, null, 2)}</pre>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {(dossier.revisionLog ?? []).length > 0 && <p className="mt-3 text-[11px] text-[#89a]">{dossier.revisionLog.length} section-level copies are kept, including any output that would otherwise have been the only record.</p>}
+            </section>
+            <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4">
+              <h2 className="text-[13px] font-semibold text-white">Investigations</h2>
+              {(dossier.investigations ?? []).length === 0 && <p className="mt-2 text-[12px] text-[#89a]">No question-driven investigation has been run.</p>}
+              <ul className="mt-3 space-y-2 text-[12px] text-[#d5deea]">
+                {(dossier.investigations ?? []).map((item) => (
+                  <li key={item.id}>{item.question}{item.finding ? ` — ${item.finding}` : ''} <span className="text-[#89a]">{item.stopReason ?? ''}</span></li>
+                ))}
+              </ul>
+            </section>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

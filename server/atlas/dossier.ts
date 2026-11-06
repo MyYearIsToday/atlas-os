@@ -11,6 +11,7 @@ import { runResearchLoop, rankSources, detectRankAmbiguity, DEFAULT_LOOP_LIMITS,
 import { classifySource, extractImages, hostOf, isOwnSiteHost, htmlMeta, htmlTitle, htmlToText, normalizeUrl, quoteSupported, scoreRelevance, type FetchDoc, type FetchedDoc } from "./source-tools";
 import { investigate as runInvestigation } from "./investigator";
 import { buildReplanPrompt, dependentsOf, MAX_PLAN_CHANGES, parseReplan, planSnapshot, REVISABLE } from "./replan";
+import { archiveStageOutput, archiveVersion } from "./dossier-history";
 import { inspectWebsite } from "./site-inspection";
 import { contradictsKnownAccount, knownPlatforms, parseSocialProfile, socialContextBlock } from "./social-intel";
 import type { SocialPlatform } from "../../src/services/scout/social-profiles";
@@ -1064,59 +1065,99 @@ export class DossierEngine {
 
   private static readonly INVESTIGATION_BUDGET = 4;
 
-  /** Sends a completed section back for revision. Its earlier output is preserved; sections built on it are flagged, not blindly re-run. */
-  private reviseStage(x: Dossier, id: StageId, reason: string): boolean {
+  /** Sends a completed section back for revision. Its earlier output is archived; sections built on it are redone, not left silently stale. */
+  private reviseStage(x: Dossier, id: StageId, reason: string, planChangeId?: string, versionId?: string): boolean {
     const st = x.stages[id];
     if (!st || st.status !== "completed" || !REVISABLE.has(id)) return false;
     const rv = (x.revisions ??= {});
     if ((rv[id]?.count ?? 0) >= 1) return false;
-    (st.history ??= []).push({ at: this.now(), reason: clip(reason, 400), output: st.output });
-    if (st.history.length > 3) st.history.shift();
+    const archived = archiveStageOutput(x, id, this.now(), clip(reason, 400), { planChangeId, versionId });
+    (st.history ??= []).push({ at: this.now(), reason: clip(reason, 400), output: st.output, ...(archived ? { revisionId: archived.id } : {}) });
+    if (st.history.length > 8) st.history.shift();
     rv[id] = { reason: clip(reason, 400), at: this.now(), count: (rv[id]?.count ?? 0) + 1, pending: true, previous: st.output };
-    const rec = (st.recovery ??= { attempts: [], final: null }); rec.round = rec.attempts.length; rec.final = null;
-    st.status = "pending"; st.taskId = null; st.attempts = 0; st.error = null; st.completedAt = null; st.staleBecause = undefined;
-    if (x.status === "completed") x.status = "active";
+    this.reopenStage(x, id);
     return true;
+  }
+
+  /** Puts a completed or failed section back in the queue without using up the planner's one-revision budget. */
+  private reopenStale(x: Dossier, id: StageId, reason: string, planChangeId?: string, versionId?: string): void {
+    const st = x.stages[id];
+    if (!st || (st.status !== "completed" && st.status !== "failed")) return;
+    const archived = st.output == null ? null : archiveStageOutput(x, id, this.now(), clip(reason, 400), { planChangeId, versionId });
+    if (st.output != null) {
+      (st.history ??= []).push({ at: this.now(), reason: clip(reason, 400), output: st.output, ...(archived ? { revisionId: archived.id } : {}) });
+      if (st.history.length > 8) st.history.shift();
+      const rv = (x.revisions ??= {});
+      if ((rv[id]?.count ?? 0) < 1) rv[id] = { reason: clip(reason, 400), at: this.now(), count: rv[id]?.count ?? 0, pending: true, previous: st.output };
+      else { rv[id]!.pending = true; rv[id]!.previous = st.output; rv[id]!.reason = clip(reason, 400); }
+    }
+    st.staleBecause = clip(reason, 240);
+    this.reopenStage(x, id);
+  }
+
+  private reopenStage(x: Dossier, id: StageId): void {
+    const st = x.stages[id];
+    const rec = (st.recovery ??= { attempts: [], final: null }); rec.round = rec.attempts.length; rec.final = null;
+    st.status = "pending"; st.taskId = null; st.attempts = 0; st.error = null; st.completedAt = null;
+    if (x.status === "completed") x.status = "active";
   }
 
   /**
    * The planner evaluates a discovery. It may keep the plan, revise specific completed sections, and add specialist tasks.
-   * Code enforces the limits. Never throws. Nothing here publishes, contacts anyone, or spends.
+   * Code enforces the limits. A bad planner response leaves the dossier as it was. Nothing here publishes, contacts anyone, or spends.
    */
   async replan(businessId: string, trigger: PlanChange["trigger"], exceptStage?: StageId): Promise<PlanChange | null> {
+    const x = this.get(businessId); const b = this.d.store.businesses.get(businessId);
+    if (!x || !b) return null;
+    const log = (x.planLog ??= []);
+    const summary = clip(trigger.summary, 600);
+    const prior = [...log].reverse().find((c) => c.trigger.kind === trigger.kind && c.trigger.summary === summary && c.trigger.ids.join(",") === trigger.ids.join(","));
+    if (prior) return prior;
+    if (log.length >= MAX_PLAN_CHANGES) return null;
+    const decide = this.d.reason ?? this.d.plan;
+    const titles = Object.fromEntries(STAGES.map((st) => [st.id, st.title])) as Record<StageId, string>;
+    const base = { id: `P${log.length + 1}`, at: this.now(), trigger: { ...trigger, summary }, kept: [] as StageId[], revised: [] as StageId[], stale: [] as StageId[], tasks: [] as PlannedTask[], plannerModel: !!decide };
+    let parsed: ReturnType<typeof parseReplan> = null;
+    if (decide) parsed = parseReplan(await decide(buildReplanPrompt(b.canonicalName, planSnapshot(x, titles), summary, log)).catch(() => null), x);
+    if (!decide || !parsed) {
+      const change: PlanChange = { ...base, decision: "continue", reason: decide ? "The planner returned no usable decision; the plan was left unchanged and the discovery stays on record." : "No planner model is available, so the discovery is recorded but the plan could not be re-evaluated." };
+      log.push(change); this.save(x); await this.d.flush?.();
+      return change;
+    }
+    const backup = { stages: structuredClone(x.stages), revisions: structuredClone(x.revisions), history: structuredClone(x.history), revisionLog: structuredClone(x.revisionLog), status: x.status, limitations: x.limitations.slice() };
     try {
-      const x = this.get(businessId); const b = this.d.store.businesses.get(businessId);
-      if (!x || !b) return null;
-      const log = (x.planLog ??= []);
-      if (log.length >= MAX_PLAN_CHANGES) return null;
-      const decide = this.d.reason ?? this.d.plan;
-      const titles = Object.fromEntries(STAGES.map((st) => [st.id, st.title])) as Record<StageId, string>;
-      const base = { id: `P${log.length + 1}`, at: this.now(), trigger: { ...trigger, summary: clip(trigger.summary, 600) }, kept: [] as StageId[], revised: [] as StageId[], stale: [] as StageId[], tasks: [] as PlannedTask[], plannerModel: !!decide };
-      let change: PlanChange;
-      const parsed = decide ? parseReplan(await decide(buildReplanPrompt(b.canonicalName, planSnapshot(x, titles), trigger.summary, log)).catch(() => null), x) : null;
-      if (!decide) change = { ...base, decision: "continue", reason: "No planner model is available, so the discovery is recorded but the plan could not be re-evaluated." };
-      else if (!parsed) change = { ...base, decision: "continue", reason: "The planner returned no usable decision; the plan was left unchanged and the discovery stays on record." };
-      else {
-        const revised: StageId[] = [];
-        for (const r of parsed.revise) if (r.stage !== exceptStage && this.reviseStage(x, r.stage, `Planner revision: ${r.note}`)) revised.push(r.stage);
-        const stale = dependentsOf(revised, STAGES, x).filter((id) => !revised.includes(id));
-        for (const id of stale) x.stages[id].staleBecause = clip(`${titles[revised[0]]} was revised: ${parsed.reason}`, 240);
-        const tasks: PlannedTask[] = [];
-        for (const t of parsed.addTasks) tasks.push(await this.runPlannedTask(b, x, t, parsed.reason));
-        change = { ...base, decision: revised.length && tasks.length ? "revise_and_add" : revised.length ? "revise" : tasks.length ? "add_tasks" : "continue", reason: parsed.reason, kept: parsed.keep, revised, stale, tasks };
-      }
+      const version = parsed.revise.length ? archiveVersion(x, this.now(), parsed.reason, { kind: "revision", planChangeId: base.id, triggerSummary: summary }) : null;
+      const revised: StageId[] = [];
+      for (const r of parsed.revise) if (r.stage !== exceptStage && this.reviseStage(x, r.stage, `Planner revision: ${r.note}`, base.id, version?.id)) revised.push(r.stage);
+      const stale = dependentsOf(revised, STAGES, x, new Set(["completed", "failed"])).filter((id) => !revised.includes(id));
+      const why = revised.length ? `${titles[revised[0]]} was revised: ${parsed.reason}` : parsed.reason;
+      for (const id of stale) this.reopenStale(x, id, why, base.id, version?.id);
+      const tasks: PlannedTask[] = [];
+      for (const t of parsed.addTasks) tasks.push(await this.runPlannedTask(b, x, t, parsed.reason));
+      const change: PlanChange = { ...base, decision: revised.length && tasks.some((t) => t.status !== "skipped") ? "revise_and_add" : revised.length ? "revise" : tasks.some((t) => t.status !== "skipped") ? "add_tasks" : "continue", reason: parsed.reason, kept: parsed.keep, revised, stale, tasks };
       log.push(change);
       for (const id of trigger.ids) { const h = (x.handoffs ?? []).find((o) => o.id === id); if (h && h.status === "open") { h.status = "considered"; h.resolvedBy = "planner"; h.resolution = `${change.decision}: ${clip(change.reason, 200)}`; } }
       this.save(x); await this.d.flush?.();
-      if (change.revised.length) void this.kick(businessId);
+      if (change.revised.length || change.stale.length) void this.kick(businessId);
       return change;
-    } catch (e) { console.error(`[atlas-dossier] replan error: ${e instanceof Error ? e.message.slice(0, 160) : "unknown"}`); return null; }
+    } catch (e) {
+      x.stages = backup.stages; x.revisions = backup.revisions; x.history = backup.history; x.revisionLog = backup.revisionLog; x.status = backup.status; x.limitations = backup.limitations;
+      this.save(x);
+      console.error(`[atlas-dossier] replan error: ${e instanceof Error ? e.message.slice(0, 160) : "unknown"}`);
+      return null;
+    }
   }
 
   /** One extra specialist task the planner chose to add. Internal analysis only; runs through the normal mission runner. */
   private async runPlannedTask(b: BusinessIntelligence, x: Dossier, t: { title: string; description: string; assignedAI: string }, why: string): Promise<PlannedTask> {
     const n = (x.planLog ?? []).reduce((c, p) => c + p.tasks.length, 0) + 1;
     const base = { id: `T${n}`, title: t.title, assignedAI: t.assignedAI, why: clip(why, 240), at: this.now() };
+    const key = `${t.assignedAI}|${t.title.toLowerCase()}`;
+    const earlier = (x.planLog ?? []).flatMap((c) => c.tasks).filter((task) => `${task.assignedAI}|${task.title.toLowerCase()}` === key && task.status !== "skipped");
+    const queued = this.d.missionQueue.getSnapshot().some((m) => m.clientId === b.id && m.missionType === "dossier_replan_task" && m.title.startsWith(`Planner task: ${t.title}`));
+    if (earlier.length || queued || (x.planLog ?? []).flatMap((c) => c.tasks).filter((task) => task.status !== "skipped").length >= 6) {
+      return { ...base, status: "skipped", error: earlier.length || queued ? "duplicate of an earlier planner task" : "specialist task limit reached" };
+    }
     try {
       const task = await this.d.missionQueue.create({
         title: `Planner task: ${t.title} — ${b.canonicalName}`,
@@ -1166,8 +1207,10 @@ export class DossierEngine {
     const x = this.get(businessId); if (!x) return { ok: false, reason: "no dossier" };
     if (this.drives.has(businessId) || this.active.has(businessId)) return { ok: false, reason: "research is running now" };
     if ((x.researchRound ?? 0) >= 5) return { ok: false, reason: "re-research limit reached" };
-    (x.history ??= []).push({ round: x.researchRound ?? 0, archivedAt: this.now(), reason: clip(reason, 200), stages: { profile: x.stages.profile.output, audit: x.stages.audit.output, swot: x.stages.swot.output, growth: x.stages.growth.output, pr: x.stages.pr.output }, sourceDigest: x.sources.filter((u) => u.role !== "competitor").slice(0, 40).map((u) => ({ id: u.id, url: u.url, retrievedAt: u.retrievedAt, ...(u.decision ? { decision: u.decision } : {}) })) });
-    if (x.history.length > 3) x.history.shift();
+    const version = archiveVersion(x, this.now(), clip(reason, 200), { kind: "reresearch" });
+    for (const id of ["profile", "audit", "competitor_discovery", "competitors", "market", "swot", "growth", "pr", "campaign", "plan"] as StageId[]) {
+      if (x.stages[id]?.output != null) archiveStageOutput(x, id, this.now(), `Archived before re-research: ${clip(reason, 160)}`, { versionId: version.id });
+    }
     x.researchRound = (x.researchRound ?? 0) + 1;
     for (const s of STAGES) x.stages[s.id] = emptyStage();
     for (const src of x.sources) if (src.decidedBy !== "operator" && src.check?.status === "fetched") src.check = { status: "not_checked" };

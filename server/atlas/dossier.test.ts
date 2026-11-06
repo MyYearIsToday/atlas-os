@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { isOwnSiteHost, DossierEngine, parseStageOutput, STAGES } from "./dossier";
 import { createPipelineDeps } from "../../src/orchestrator/atlas-pipeline";
 
-const biz = (id = "b1") => ({ id, canonicalName: "Mesa UGBS", category: "education", address: "University of Ghana, Legon", sourceReferences: ["manual"] }) as never;
-const GOOD: Record<string, unknown> = {
+export const biz = (id = "b1") => ({ id, canonicalName: "Mesa UGBS", category: "education", address: "University of Ghana, Legon", sourceReferences: ["manual"] }) as never;
+export const GOOD: Record<string, unknown> = {
   dossier_profile: { name: "Mesa UGBS", industry: "student association", productsServices: ["events"], location: "Legon", targetAudience: "students", website: "unknown", socialAccounts: [{ platform: "LinkedIn", url: "https://linkedin.com/x", basis: "verified" }], brandNotes: "", facts: [{ claim: "Student body of UGBS", basis: "verified", sourceRefs: ["S1"], quote: "official student association of the University of Ghana Business School", confidence: "medium" }, { claim: "Has 5k followers", basis: "verified", sourceRefs: ["S99"], confidence: "high" }], unknowns: ["website"] },
   dossier_audit: { summary: "Thin web presence", strengths: [{ text: "Active LinkedIn", basis: "verified", sourceRefs: ["S1"], quote: "official student association of the University of Ghana Business School" }], weaknesses: [{ text: "No website", basis: "hypothesis", sourceRefs: [] }], gaps: [], improvementOpportunities: [] },
   dossier_competitors: { shortlist: [], whitespace: [], threats: [], gaps: ["none established"], conflicts: [], method: "m" },
@@ -22,7 +22,7 @@ const seedOf = (dataUrl: string) => Buffer.from(dataUrl.split(",")[1], "base64")
 const VERDICT = (o: Record<string, unknown> = {}) => JSON.stringify({ association: "match", confidence: "high", relationship: "business_itself", reasoning: "The sign reads Mesa UGBS.", imageType: "logo", visibleText: ["Mesa UGBS"], supportingClues: [{ kind: "brand_text", detail: "name on the logo" }], conflictingClues: [], observations: [{ observation: "Blue and gold logo", category: "branding", confidence: "HIGH" }], ...o });
 const ok = (text: string) => ({ status: "OK" as const, text, provider: "workforce", model: "vision-test-model" });
 const PAGE = `<html><head><title>Mesa UGBS</title><meta property="og:image" content="/logo.png"></head><body><h1>Mesa UGBS</h1><p>Mesa UGBS is the official student association of the University of Ghana Business School in Legon, Accra.</p></body></html>`;
-function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; searchFn?: (q: string) => Promise<Array<{ title: string; url: string; snippet?: string }>>; imageFn?: (url: string) => { ok: boolean; bytes?: Uint8Array; contentType?: string; reason?: string } | null; fetchFn?: (url: string) => { ok: boolean; body?: string; reason?: string; finalUrl?: string } | null; onRun?: (taskId: string, type: string, n: number) => void; search?: never; maxConcurrent?: number; cooldown?: number; inspect?: (id: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[]; references?: Array<{ id: string; mimeType: string; dataUrl: string }> }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }> } = {}) {
+export function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; searchFn?: (q: string) => Promise<Array<{ title: string; url: string; snippet?: string }>>; imageFn?: (url: string) => { ok: boolean; bytes?: Uint8Array; contentType?: string; reason?: string } | null; fetchFn?: (url: string) => { ok: boolean; body?: string; reason?: string; finalUrl?: string } | null; onRun?: (taskId: string, type: string, n: number) => void; search?: never; maxConcurrent?: number; cooldown?: number; reason?: (prompt: string) => Promise<string | null>; inspect?: (id: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[]; references?: Array<{ id: string; mimeType: string; dataUrl: string }> }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }> } = {}) {
   const deps = createPipelineDeps({});
   const calls: string[] = [];
   const counts = new Map<string, number>();
@@ -40,12 +40,12 @@ function setup(opts: { script?: (type: string, call: number) => string | "FAIL";
   const search = opts.searchFn ?? (async (q: string) => [{ title: "Mesa UGBS Legon", url: `https://example.com/mesa-ugbs/${encodeURIComponent(q).slice(-10)}`, snippet: "Mesa UGBS, University of Ghana Legon" }, { title: "Mesa Verde Winery", url: `https://wine.example/${encodeURIComponent(q).slice(-8)}`, snippet: "Napa valley wines" }]);
   const fetchDoc = async (url: string, o?: { binary?: boolean }) => { const ov = o?.binary ? opts.imageFn?.(url) : opts.fetchFn?.(url); if (ov) return ov; return defaultFetch(url, o); };
   const defaultFetch = async (url: string, o?: { binary?: boolean }) => (o?.binary ? { ok: true, contentType: "image/png", bytes: png(url) } : url.includes("wine.") ? { ok: true, body: "<html><title>Wine</title>Napa wines</html>", finalUrl: url } : { ok: true, body: PAGE, finalUrl: url });
-  const engine = new DossierEngine({ store: deps.store, missionQueue: deps.missionQueue, runner, search, fetchDoc, inspectImage: opts.inspect, maxConcurrent: opts.maxConcurrent, retryCooldownMs: opts.cooldown ?? 0 });
+  const engine = new DossierEngine({ store: deps.store, missionQueue: deps.missionQueue, runner, search, fetchDoc, inspectImage: opts.inspect, reason: opts.reason, maxConcurrent: opts.maxConcurrent, retryCooldownMs: opts.cooldown ?? 0 });
   return { deps, engine, calls };
 }
 const discover = async (ctx: ReturnType<typeof setup>, b = biz()) => { const id = (b as { id: string }).id; ctx.deps.store.businesses.set(id, b); ctx.deps.store.started.add(id); ctx.engine.ensure(b); ctx.engine.kick(id); await ctx.engine.idle(); return ctx.engine.get(id)!; };
 /** Confirming the business is the only human step: the engine runs every eligible stage on its own. */
-const start = discover;
+export const start = discover;
 
 test("full chain: research -> profile -> audit -> SWOT -> growth -> plan, structured, sourced, follow-ups need approval", async () => {
   const c = setup();

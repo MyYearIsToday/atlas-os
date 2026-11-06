@@ -3,7 +3,7 @@ import type { ElementType, ReactNode } from 'react';
 import { Link, useLocation } from 'wouter';
 import {
   BarChart3, Bell, Bot, BriefcaseBusiness, ChevronDown, CircleDollarSign, Command, Gauge,
-  LayoutDashboard, ListTodo, Menu, PanelLeftClose, Radar, Search, Settings, Users, X,
+  History, LayoutDashboard, ListTodo, Menu, PanelLeftClose, Radar, Search, Settings, Users, X,
 } from 'lucide-react';
 
 const nav = [
@@ -12,6 +12,7 @@ const nav = [
   { href: '/mission-queue', label: 'Mission Queue', icon: ListTodo },
   { href: '/crm', label: 'CRM Pipeline', icon: Users },
   { href: '/scout', label: 'Scout Entry', icon: Radar },
+  { href: '/dossier', label: 'Dossier History', icon: History },
   { href: '/clients', label: 'Clients', icon: BriefcaseBusiness },
   { href: '/visibility', label: 'Visibility Score', icon: Gauge },
   { href: '/atlas-leaderboard', label: 'Atlas Leaderboard', icon: BarChart3 },

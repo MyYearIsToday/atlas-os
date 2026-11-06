@@ -66,15 +66,15 @@ export function parseReplan(text: string | null, d: Dossier): ReplanDecision | n
   return { decision, reason, keep: keep.filter((k) => !revise.some((r) => r.stage === k)), revise, addTasks };
 }
 
-/** Completed sections that were built (directly or through others) on a revised one. They are flagged, not re-run, unless the planner also revised them. */
-export function dependentsOf(revised: StageId[], deps: Array<{ id: StageId; dependsOn: StageId[]; softDependsOn?: StageId[] }>, d: Dossier): StageId[] {
+/** Sections built on a revised one. Completed ones are flagged and redone; failed ones are reopened too. Unrelated sections are not included. */
+export function dependentsOf(revised: StageId[], deps: Array<{ id: StageId; dependsOn: StageId[]; softDependsOn?: StageId[] }>, d: Dossier, statuses: ReadonlySet<string> = new Set(["completed"])): StageId[] {
   const out = new Set<StageId>(); let grew = true;
   const roots = new Set<StageId>(revised);
   while (grew) {
     grew = false;
     for (const s of deps) {
       if (out.has(s.id) || roots.has(s.id)) continue;
-      if ([...s.dependsOn, ...(s.softDependsOn ?? [])].some((p) => roots.has(p) || out.has(p)) && d.stages[s.id]?.status === "completed") { out.add(s.id); grew = true; }
+      if ([...s.dependsOn, ...(s.softDependsOn ?? [])].some((p) => roots.has(p) || out.has(p)) && statuses.has(d.stages[s.id]?.status)) { out.add(s.id); grew = true; }
     }
   }
   return [...out];
