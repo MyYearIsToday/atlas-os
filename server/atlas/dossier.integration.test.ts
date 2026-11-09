@@ -25,6 +25,7 @@ const REPLY: Record<string, unknown> = {
   "Market and audience analysis": { audience: [], localContext: [], trends: [], opportunities: [], threats: [], barriers: [], unknowns: ["audience data not found in approved sources"], estimates: [] },
   "Campaign plan and content drafts": { objective: "visibility", pillars: [], channels: [], campaigns: [{ name: "Local awareness", objective: "be found", audience: "locals", message: "m", callToAction: "visit", channels: ["Instagram"], kpis: [{ metric: "profile visits", measurement: "platform insights", baseline: "unknown" }] }], sequence: [], content: [{ campaign: "Local awareness", platform: "Instagram", format: "post", draft: "Fresh coffee in Accra", creativeBrief: "b" }], assumptions: [] },
   "SWOT analysis": { strengths: [{ text: "Local niche", basis: "hypothesis", sourceRefs: [] }], weaknesses: [], opportunities: [], threats: [] },
+  "Insights synthesis": { summary: "Joe's Cafe has a basic site and no established social accounts in the approved sources.", findings: [{ title: "Site without a social presence", implication: "Visibility work should not assume an existing social account, because none was found in the approved sources.", basis: "hypothesis", sourceRefs: [] }], unknowns: ["No audience size was stated."] },
   "Strategic opportunities and recommendations": { recommendations: [{ title: "Claim social handles", kind: "experiment", area: "social", currentSituation: "no handles were identified in the approved sources", rationale: "A hypothesis: consistent handles make the business easier to find and cite across channels.", priority: "high", effort: "low", intendedOutcome: "one findable brand name", successMetric: "handles claimed and linked from the site", nextSteps: ["Check each platform for an existing account first"], basis: "hypothesis", sourceRefs: [] }] },
   "PR intelligence and strategy": { narrative: "A neighbourhood cafe with a basic site and no established media profile.", positioning: "A local Accra cafe, framed only from what was actually found.", newsworthy: [{ angle: "Neighbourhood opening story", whyNewsworthy: "Local coverage often follows a new cafe, but no coverage was found in the sources.", timing: "unknown", basis: "hypothesis", sourceRefs: [] }], stakeholders: [{ group: "Nearby residents", interest: "A place to get coffee", approach: "In-store and the existing site" }], mediaOpportunities: [], pressReleaseConcepts: [], pitches: [], thoughtLeadership: [], reputationRisks: [], crisisReadiness: "No incident is known. Do not invent one.", unknowns: ["No media coverage was found."] },
   "Action plan and follow-ups": { dossierSummary: "ok", actionPlan: [{ title: "Claim handles", description: "d", owner: "Atlas", timeframe: "1 week" }], followUps: [{ title: "Email the owner", description: "draft", assignedAI: "closer", external: true }], limitations: [] },
@@ -61,7 +62,7 @@ test("real MissionRunner/Workforce runs every dossier stage; results persist on 
 
   const d = engine.get(id)!;
   assert.equal(d.status, "completed");
-  assert.deepEqual(stages, ["Business profile", "Situation and digital presence audit", "Competitor analysis", "Market and audience analysis", "SWOT analysis", "Strategic opportunities and recommendations", "PR intelligence and strategy", "Campaign plan and content drafts", "Action plan and follow-ups"]);
+  assert.deepEqual(stages, ["Business profile", "Situation and digital presence audit", "Competitor analysis", "Market and audience analysis", "SWOT analysis", "Insights synthesis", "Strategic opportunities and recommendations", "PR intelligence and strategy", "Campaign plan and content drafts", "Action plan and follow-ups"]);
   for (const s of STAGES.filter((x) => x.id !== "research" && x.id !== "competitor_discovery")) {
     const t = deps.missionQueue.getSnapshot().find((m) => m.taskId === d.stages[s.id].taskId)!;
     assert.equal(t.status, "Completed", s.id);
@@ -83,5 +84,5 @@ test("real MissionRunner/Workforce runs every dossier stage; results persist on 
   assert.notEqual(deps.missionQueue.getSnapshot().find((t) => t.taskId === fu.taskId)!.status, "Completed");
   const autonomous = await runner.run(fu.taskId, {}, { autonomous: true });
   assert.equal(autonomous.outcome, "BLOCKED", "autonomous runs never execute a follow-up");
-  assert.equal(stages.length, 9, "no AI call was made for the follow-up");
+  assert.equal(stages.length, 10, "no AI call was made for the follow-up");
 });

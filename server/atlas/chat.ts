@@ -220,8 +220,11 @@ export class ChatService {
               const rec = await this.d.engine.investigate(businessId, c.request, "chat");
               if (!rec) coordination.push({ kind: c.kind, request: c.request, status: "limit_reached", outcome: "The investigation limit for this dossier has been reached." });
               else {
-                retrieved = [...(retrieved ?? []), ...rec.retrieved.map((a) => ({ id: a.id, url: a.url, decision: a.decision, read: a.read, reason: rec.finding ?? "" }))];
-                coordination.push({ kind: c.kind, request: c.request, status: rec.retrieved.some((a) => a.read) ? "done" : "nothing_found", outcome: rec.finding ?? `${rec.steps?.length ?? 0} step(s), ${rec.retrieved.filter((a) => a.read).length} page(s) read; ${rec.concluded ? "the question was judged answered" : "not conclusive"}${rec.stopReason ? ` (stopped: ${rec.stopReason.replace("_", " ")})` : ""}` });
+                const approved = rec.retrieved.filter((a) => a.read && a.decision === "approved");
+                const rejected = rec.retrieved.filter((a) => a.decision !== "approved");
+                retrieved = [...(retrieved ?? []), ...rec.retrieved.map((a) => ({ id: a.id, url: a.url, decision: a.decision, read: a.read, reason: a.decision === "approved" ? (rec.finding ?? "") : "not approved evidence" }))];
+                const outcome = rec.concluded && rec.finding ? `${rec.finding} Approved sources: ${approved.map((a) => a.id).join(", ") || "already on the dossier"}.` : `Not concluded. ${approved.length} approved page(s) read${approved.length ? ` (${approved.map((a) => a.id).join(", ")})` : ""}; ${rejected.length} not approved. ${rec.stopReason ? `Stopped: ${rec.stopReason.replaceAll("_", " ")}.` : ""}`;
+                coordination.push({ kind: c.kind, request: c.request, status: approved.length || rec.concluded ? "done" : "nothing_found", outcome });
               }
             } else {
               const raised = await this.d.engine.raiseFromChat(businessId, c.kind === "challenge" ? "challenge" : "alternative_direction", c.request);

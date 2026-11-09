@@ -7,10 +7,10 @@ import { recoverJsonObject } from "./json-recovery";
  * code decides what is allowed: only completed analytic sections can be revised, each at most once, identity-defining sections never,
  * and added tasks are internal analysis for a known specialist. Nothing external can come out of a re-plan.
  *
- * This repository has no separate insights stage. Revisable sections are the analytic stages that actually exist here, plus PR.
+ * Revisable sections are the analytic stages, including the insights synthesis and PR. Research, profile and competitor discovery stay protected.
  */
 
-export const REVISABLE: ReadonlySet<StageId> = new Set<StageId>(["audit", "competitors", "market", "swot", "growth", "pr", "campaign", "plan"]);
+export const REVISABLE: ReadonlySet<StageId> = new Set<StageId>(["audit", "competitors", "market", "swot", "insights", "growth", "pr", "campaign", "plan"]);
 export const MAX_PLAN_CHANGES = 6;
 const AGENTS = new Set(["scout", "builder", "operator", "closer"]);
 const clip = (v: unknown, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);

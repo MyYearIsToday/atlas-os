@@ -113,6 +113,7 @@ export const MISSION_TASK_TYPE: Record<string, string> = {
   dossier_market: "market_analysis",
   dossier_campaign: "writing",
   dossier_swot: "business_analysis",
+  dossier_insights: "business_analysis",
   dossier_growth: "strategy",
   dossier_pr: "strategy",
   dossier_replan_task: "business_analysis",

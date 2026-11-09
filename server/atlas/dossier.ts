@@ -11,7 +11,8 @@ import { runResearchLoop, rankSources, detectRankAmbiguity, DEFAULT_LOOP_LIMITS,
 import { classifySource, extractImages, hostOf, isOwnSiteHost, htmlMeta, htmlTitle, htmlToText, normalizeUrl, quoteSupported, scoreRelevance, type FetchDoc, type FetchedDoc } from "./source-tools";
 import { investigate as runInvestigation } from "./investigator";
 import { buildReplanPrompt, dependentsOf, MAX_PLAN_CHANGES, parseReplan, planSnapshot, REVISABLE } from "./replan";
-import { archiveStageOutput, archiveVersion } from "./dossier-history";
+import { archiveStageOutput, archiveVersion, ARCHIVED_STAGES } from "./dossier-history";
+import { buildPipelineLink } from "./pipeline-link";
 import { inspectWebsite } from "./site-inspection";
 import { contradictsKnownAccount, knownPlatforms, parseSocialProfile, socialContextBlock } from "./social-intel";
 import type { SocialPlatform } from "../../src/services/scout/social-profiles";
@@ -77,7 +78,8 @@ export const STAGES: StageDef[] = [
   { id: "competitors", missionType: "dossier_competitors", assignedAI: "scout", title: "Competitor analysis", dependsOn: ["competitor_discovery"] },
   { id: "market", missionType: "dossier_market", assignedAI: "builder", title: "Market and audience analysis", dependsOn: ["profile"], softDependsOn: ["competitors"] },
   { id: "swot", missionType: "dossier_swot", assignedAI: "builder", title: "SWOT analysis", dependsOn: ["audit", "market"], softDependsOn: ["competitors"] },
-  { id: "growth", missionType: "dossier_growth", assignedAI: "operator", title: "Strategic opportunities and recommendations", dependsOn: ["swot"], softDependsOn: ["competitors"] },
+  { id: "insights", missionType: "dossier_insights", assignedAI: "operator", title: "Insights synthesis", dependsOn: ["swot"], softDependsOn: ["competitors"] },
+  { id: "growth", missionType: "dossier_growth", assignedAI: "operator", title: "Strategic opportunities and recommendations", dependsOn: ["insights"], softDependsOn: ["competitors"] },
   { id: "pr", missionType: "dossier_pr", assignedAI: "closer", title: "PR intelligence and strategy", dependsOn: ["growth"] },
   { id: "campaign", missionType: "dossier_campaign", assignedAI: "closer", title: "Campaign plan and content drafts", dependsOn: ["growth"], softDependsOn: ["pr"] },
   { id: "plan", missionType: "dossier_plan", assignedAI: "operator", title: "Action plan and follow-ups", dependsOn: ["campaign"] },
@@ -153,6 +155,21 @@ function normaliseStageOutput(stage: StageId, o: Record<string, unknown>, eviden
       const out = { strengths: items(o.strengths, validRefs), weaknesses: items(o.weaknesses, validRefs), opportunities: items(o.opportunities, validRefs), threats: items(o.threats, validRefs) };
       if (!out.strengths.length && !out.weaknesses.length && !out.opportunities.length && !out.threats.length) throw new Error("SWOT is empty");
       return out;
+    }
+    case "insights": {
+      const summary = clip(o.summary, 700);
+      const findings = (Array.isArray(o.findings) ? o.findings : []).slice(0, 8).map((r) => {
+        const row = r as Record<string, unknown>;
+        const it = items([{ text: row?.implication ?? row?.text, basis: row?.basis, sourceRefs: row?.sourceRefs, quote: row?.quote }], validRefs)[0];
+        const title = clip(row?.title, 160);
+        const implication = clip(row?.implication ?? row?.text, 500);
+        if (!title || implication.length < 20) return null;
+        if (/\b\d+(?:\.\d+)?\s*%|\b(?:ROI|impressions|conversions)\b/i.test(`${title} ${implication}`) && !(it?.sourceRefs?.length)) return null;
+        return { title, implication, basis: it?.basis ?? "hypothesis", sourceRefs: it?.sourceRefs ?? [], ...(it?.quote ? { quote: it.quote } : {}) };
+      }).filter((f): f is NonNullable<typeof f> => f !== null);
+      if (!summary) throw new Error("insights synthesis has no summary");
+      if (!findings.length) throw new Error("insights synthesis has no usable finding");
+      return { summary, findings, unknowns: strs(o.unknowns, 8, 240) };
     }
     case "growth": {
       const recs = (Array.isArray(o.recommendations) ? o.recommendations : []).slice(0, 12).map((r) => {
@@ -263,6 +280,7 @@ const SPEC: Record<Exclude<StageId, "research" | "competitor_discovery">, string
   market: `JSON keys: audience[], localContext[], trends[], threats[], barriers[] (items {text,basis,sourceRefs[string],quote}), opportunities[{title,rationale,constraints,basis,sourceRefs[string],quote}], estimates[{description,method,uncertainty,sourceRefs[string]}] (ONLY if an approved source supports it; otherwise an empty array), unknowns[string]. Consider Ghana-specific context (locations, mobile-first and social-led discovery, realistic budgets, businesses with limited digital infrastructure) only where the sources or the business record support it; never rely on stereotypes. No market sizes, demographics or prices unless a source states them.`,
   campaign: `JSON keys: objective(string), pillars[{name,rationale}], channels[{channel,why,constraints}] (match the business's apparent resources and digital maturity), campaigns[{name,addresses[string] (the EXACT titles of the growth recommendations this campaign puts into practice; use only titles listed in the growth context),objective,audience,message,callToAction,channels[string],kpis[{metric,measurement,baseline}],dependencies[string],assumptions[string],risks[string],sourceRefs[string]}] (max 4), sequence[{activity,dependsOn}] (order by dependency, NO calendar dates), content[{campaign,platform,format,draft,callToAction,creativeBrief}] (internal drafts only, specific to this business and its evidence, no invented offers, prices, awards or testimonials), assumptions[string]. Earned-media and reputation work comes from the PR strategy above: build on it, do not repeat it. Baselines are "unknown" unless a source gives them; targets are set later by the operator.`,
   swot: `JSON keys: strengths[], weaknesses[], opportunities[], threats[] where each item is {text,basis,sourceRefs[string],quote}. Separate verified findings from hypotheses and list unknowns as basis "unknown". Threats and competitors must be specific to this business's evidence, never generic.`,
+  insights: `JSON keys: summary(string), findings[{title,implication,basis,sourceRefs[string],quote}] (max 8), unknowns[string]. Synthesize what the profile, audit, competitor, market and SWOT evidence means for THIS business. Each implication must follow from those sections. Do not invent reach, impressions, conversions, ROI, prices or audience sizes. If a number is not in an approved source, leave it out and list the gap under unknowns.`,
   growth: `JSON key: recommendations[{title,area:"positioning|visibility|content|social|reputation|acquisition",kind:"finding-based|experiment",currentSituation,rationale,priority:"high|medium|low",effort,intendedOutcome,successMetric,dependencies[string],risks[string],nextSteps[string],basis,sourceRefs[string],quote}]. Use the competitor and market analysis above. First state currentSituation from approved sources; do not default to "build a website / improve SEO / post more" without checking what already exists. Mark kind "experiment" for proposals that test a hypothesis. successMetric must be measurable but must not contain invented baseline numbers.`,
   pr: `You are the agency's PR strategist. Produce PR intelligence for THIS business from the evidence: not generic advice. JSON keys: narrative(the public story, grounded in sources), positioning(how the business should be framed publicly and why), reputation{text,basis,sourceRefs[string],quote} (what the evidence shows about how it is perceived; if nothing is readable say unknown), newsworthy[{angle,whyNewsworthy,timing,basis:"verified|inference|hypothesis",sourceRefs[string]}] (genuine news hooks only: history, products, milestones, community role, partnerships, industry shifts; none if the evidence shows none), stakeholders[{group,interest,approach}], mediaOpportunities[{outletType,angle,rationale}] (types of outlet or programme, never invented named journalists or outlets that were not found), pressReleaseConcepts[{headline,keyMessages[string],whyNow}], pitches[{audience,pitch}] (draft only, 2-3 sentences each), thoughtLeadership[{topic,spokespersonRole,format}], reputationRisks[{risk,basis,sourceRefs[string],mitigation}], crisisReadiness(what to prepare, without inventing incidents), unknowns[string]. Use the growth recommendations; do not repeat them. Nothing is sent or published.`,
   plan: `JSON keys: dossierSummary(string, <=6 sentences), actionPlan[{title,description,owner,timeframe,dependencies[string],assumptions[string]}], followUps[{title,description,assignedAI:"scout|builder|operator|closer",external:boolean}] (max ${MAX_FOLLOW_UPS}; set external:true for anything that would contact, publish or spend), limitations[string] (missing data, unavailable sources). Timeframes must be tied to scope and dependencies and state assumptions; otherwise use "unspecified". No arbitrary dates.`,
@@ -303,7 +321,7 @@ export function contextBlock(b: BusinessIntelligence, d: Dossier, store: Pipelin
   const prior = STAGES.filter((s) => s.id !== "research" && s.id !== "competitor_discovery" && STAGES.findIndex((x) => x.id === s.id) < STAGES.findIndex((x) => x.id === upTo) && d.stages[s.id].output)
     .map((s) => `## ${s.title} (already produced)\n${clip(JSON.stringify(d.stages[s.id].output), 3500)}`).join("\n\n");
   const comp0 = d.stages.competitors;
-  const unavailable = ["market", "swot", "growth", "pr", "campaign", "plan"].includes(upTo) && comp0.status === "blocked" ? `\n\n--- COMPETITOR ANALYSIS: NOT AVAILABLE ---\nIt could not be produced (${comp0.error ?? "gave up after repeated attempts"}). Say that competitors are not established; do not invent them.` : "";
+  const unavailable = ["market", "swot", "insights", "growth", "pr", "campaign", "plan"].includes(upTo) && comp0.status === "blocked" ? `\n\n--- COMPETITOR ANALYSIS: NOT AVAILABLE ---\nIt could not be produced (${comp0.error ?? "gave up after repeated attempts"}). Say that competitors are not established; do not invent them.` : "";
   const rv = d.revisions?.[upTo];
   const revised = rv?.pending && rv.previous ? `\n\n--- REVISION REQUESTED (${rv.reason}) ---\nYour earlier version of this section is below. Keep what still holds, change or withdraw what the new information undermines, and state what changed and why.\n${clip(JSON.stringify(rv.previous), 3500)}` : "";
   const prev = upTo === "pr" && d.history?.length ? (() => { const h = d.history[d.history.length - 1]; return `\n\n--- PREVIOUS VERSION OF THIS DOSSIER (round ${h.round}, archived ${h.archivedAt.slice(0, 10)}; use it to report what CHANGED, never as current fact) ---\n${clip(JSON.stringify({ profile: h.stages.profile, swot: h.stages.swot, growth: h.stages.growth, pr: h.stages.pr }), 3000)}\nSources then: ${h.sourceDigest.length}; now: ${d.sources.filter((u) => u.role !== "competitor").length}.`; })() : "";
@@ -324,6 +342,10 @@ export function missionContext(b: BusinessIntelligence, d: Dossier | undefined, 
 export class DossierEngine {
   private active = new Set<string>();
   private drives = new Map<string, Promise<void>>();
+  /** Set when a replan reopens stages while a drive is already running, so that drive is followed by one more pass. */
+  private driveAgain = new Set<string>();
+  /** Replans for one business run one at a time. A second call waits instead of mutating the same dossier. */
+  private replanChain = new Map<string, Promise<void>>();
   constructor(private d: DossierDeps) {
     // Dossiers hydrated from PostgreSQL were written by older code. Bring them to the current shape in memory (additive only; written back on the next normal save).
     for (const x of this.d.store.dossiers.values()) upgradeDossier(x);
@@ -365,11 +387,16 @@ export class DossierEngine {
 
   /** Starts (or joins) the background drive for one business. Never throws. */
   kick(businessId: string, maxStages = STAGES.length * 2): { accepted: boolean; reason?: string } {
-    if (this.drives.has(businessId)) return { accepted: true, reason: "already running" };
+    if (this.drives.has(businessId)) { this.driveAgain.add(businessId); return { accepted: true, reason: "joined the running drive" }; }
     if (this.active.size >= (this.d.maxConcurrent ?? 2)) return { accepted: false, reason: "queued: concurrency limit" };
     this.active.add(businessId);
     const p = this.drive(businessId, maxStages).catch((e) => { const x = this.get(businessId); if (x) { x.limitations.push(`engine error: ${clip(e instanceof Error ? e.message : e, 160)}`); this.save(x); } })
-      .finally(() => { this.active.delete(businessId); this.drives.delete(businessId); void this.d.flush?.(); });
+      .finally(() => {
+        this.active.delete(businessId); this.drives.delete(businessId);
+        const again = this.driveAgain.delete(businessId);
+        void this.d.flush?.();
+        if (again) this.kick(businessId);
+      });
     this.drives.set(businessId, p);
     return { accepted: true };
   }
@@ -974,7 +1001,10 @@ export class DossierEngine {
       if (parsed.repairs.length) x.limitations.push(`${s.title}: the model's JSON needed mechanical repair (${parsed.repairs.join(", ")}); content was validated after repair.`);
       if (rec.attempts.length - round > 1) x.limitations.push(`${s.title}: needed ${rec.attempts.length - round} attempts to get usable output (${rec.attempts.slice(round, -1).map((a) => `${a.model ?? "unknown model"}: ${a.validationError}`).join("; ")}).`);
       if (s.id === "profile") x.identity = { entityType: String(parsed.output.entityType ?? "unknown"), distinctFrom: (parsed.output.distinctFrom as string[]) ?? [] };
-      if (s.id === "plan") await this.createFollowUps(b, x, parsed.output.followUps as Array<{ title: string; description: string; assignedAI: string; external: boolean }>);
+      if (s.id === "plan") {
+        await this.createFollowUps(b, x, parsed.output.followUps as Array<{ title: string; description: string; assignedAI: string; external: boolean }>);
+        x.pipelineLink = buildPipelineLink(b, x);
+      }
       return;
     }
   }
@@ -1107,6 +1137,13 @@ export class DossierEngine {
    * Code enforces the limits. A bad planner response leaves the dossier as it was. Nothing here publishes, contacts anyone, or spends.
    */
   async replan(businessId: string, trigger: PlanChange["trigger"], exceptStage?: StageId): Promise<PlanChange | null> {
+    const prev = this.replanChain.get(businessId) ?? Promise.resolve();
+    const run = prev.then(() => this.replanOnce(businessId, trigger, exceptStage));
+    this.replanChain.set(businessId, run.then(() => undefined, () => undefined));
+    return run;
+  }
+
+  private async replanOnce(businessId: string, trigger: PlanChange["trigger"], exceptStage?: StageId): Promise<PlanChange | null> {
     const x = this.get(businessId); const b = this.d.store.businesses.get(businessId);
     if (!x || !b) return null;
     const log = (x.planLog ??= []);
@@ -1124,7 +1161,8 @@ export class DossierEngine {
       log.push(change); this.save(x); await this.d.flush?.();
       return change;
     }
-    const backup = { stages: structuredClone(x.stages), revisions: structuredClone(x.revisions), history: structuredClone(x.history), revisionLog: structuredClone(x.revisionLog), status: x.status, limitations: x.limitations.slice() };
+    const backup = { stages: structuredClone(x.stages), revisions: structuredClone(x.revisions), history: structuredClone(x.history), revisionLog: structuredClone(x.revisionLog), status: x.status, limitations: x.limitations.slice(), planLog: structuredClone(x.planLog), handoffs: structuredClone(x.handoffs) };
+    const created: string[] = [];
     try {
       const version = parsed.revise.length ? archiveVersion(x, this.now(), parsed.reason, { kind: "revision", planChangeId: base.id, triggerSummary: summary }) : null;
       const revised: StageId[] = [];
@@ -1133,7 +1171,7 @@ export class DossierEngine {
       const why = revised.length ? `${titles[revised[0]]} was revised: ${parsed.reason}` : parsed.reason;
       for (const id of stale) this.reopenStale(x, id, why, base.id, version?.id);
       const tasks: PlannedTask[] = [];
-      for (const t of parsed.addTasks) tasks.push(await this.runPlannedTask(b, x, t, parsed.reason));
+      for (const t of parsed.addTasks) { const task = await this.runPlannedTask(b, x, t, parsed.reason); if (task.taskId) created.push(task.taskId); tasks.push(task); }
       const change: PlanChange = { ...base, decision: revised.length && tasks.some((t) => t.status !== "skipped") ? "revise_and_add" : revised.length ? "revise" : tasks.some((t) => t.status !== "skipped") ? "add_tasks" : "continue", reason: parsed.reason, kept: parsed.keep, revised, stale, tasks };
       log.push(change);
       for (const id of trigger.ids) { const h = (x.handoffs ?? []).find((o) => o.id === id); if (h && h.status === "open") { h.status = "considered"; h.resolvedBy = "planner"; h.resolution = `${change.decision}: ${clip(change.reason, 200)}`; } }
@@ -1141,7 +1179,8 @@ export class DossierEngine {
       if (change.revised.length || change.stale.length) void this.kick(businessId);
       return change;
     } catch (e) {
-      x.stages = backup.stages; x.revisions = backup.revisions; x.history = backup.history; x.revisionLog = backup.revisionLog; x.status = backup.status; x.limitations = backup.limitations;
+      x.stages = backup.stages; x.revisions = backup.revisions; x.history = backup.history; x.revisionLog = backup.revisionLog; x.status = backup.status; x.limitations = backup.limitations; x.planLog = backup.planLog; x.handoffs = backup.handoffs;
+      for (const taskId of created) { try { await this.d.missionQueue.update(taskId, { status: "Failed", completedAt: null, lastFailureReason: "replan rolled back before it was committed" }); } catch { /* the dossier is already restored */ } }
       this.save(x);
       console.error(`[atlas-dossier] replan error: ${e instanceof Error ? e.message.slice(0, 160) : "unknown"}`);
       return null;
@@ -1158,18 +1197,20 @@ export class DossierEngine {
     if (earlier.length || queued || (x.planLog ?? []).flatMap((c) => c.tasks).filter((task) => task.status !== "skipped").length >= 6) {
       return { ...base, status: "skipped", error: earlier.length || queued ? "duplicate of an earlier planner task" : "specialist task limit reached" };
     }
+    const handoff = this.openHandoff(x, { from: "planner", fromEmployee: t.assignedAI, kind: "needs_evidence", detail: `${t.title}. ${t.description}`, sourceRefs: [] });
     try {
       const task = await this.d.missionQueue.create({
         title: `Planner task: ${t.title} — ${b.canonicalName}`,
-        description: `${PREAMBLE}\n\nTASK (added by the planner): ${t.title}\n${t.description}\nWhy it was added: ${why}\n\nWrite a substantive internal work product in prose (short headed sections or bullets), not JSON. Keep what is observed (cite source ids like S1), what you infer and what is unknown clearly apart.\n\n${contextBlock(b, x, this.d.store, "plan")}`,
+        description: `${PREAMBLE}\n\nTASK (added by the planner): ${t.title}\n${t.description}\nWhy it was added: ${why}\nHandoff: ${handoff?.id ?? "none"}. This is internal analysis for ${t.assignedAI}. Do not contact anyone, publish, or spend.\n\nWrite a substantive internal work product in prose (short headed sections or bullets), not JSON. Keep what is observed (cite source ids like S1), what you infer and what is unknown clearly apart.\n\n${contextBlock(b, x, this.d.store, "plan")}`,
         assignedAI: t.assignedAI as Task["assignedAI"], clientId: b.id, priority: "Medium", approvalRequired: "Auto", missionType: "dossier_replan_task", dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
       });
       const r = await this.d.runner.run(task.taskId, {}, { autonomous: true });
-      if (r.outcome !== "COMPLETED") return { ...base, taskId: task.taskId, status: "failed", error: clip(`${r.outcome}${r.reason ? `: ${r.reason}` : ""}`, 160) };
+      if (r.outcome !== "COMPLETED") { this.closeHandoff(x, handoff?.id, "considered", clip(`${r.outcome}${r.reason ? `: ${r.reason}` : ""}`, 200)); return { ...base, taskId: task.taskId, status: "failed", error: clip(`${r.outcome}${r.reason ? `: ${r.reason}` : ""}`, 160) }; }
       const out = this.d.store.missionOutputs.get(task.taskId);
-      if (!out?.text) return { ...base, taskId: task.taskId, status: "failed", error: "completed without an output" };
+      if (!out?.text) { this.closeHandoff(x, handoff?.id, "considered", "completed without an output"); return { ...base, taskId: task.taskId, status: "failed", error: "completed without an output" }; }
+      this.closeHandoff(x, handoff?.id, "investigated", clip(out.text, 200));
       return { ...base, taskId: task.taskId, status: "completed", result: clip(out.text, 2500) };
-    } catch (e) { return { ...base, status: "failed", error: clip(e instanceof Error ? e.message : e, 160) }; }
+    } catch (e) { this.closeHandoff(x, handoff?.id, "considered", clip(e instanceof Error ? e.message : e, 200)); return { ...base, status: "failed", error: clip(e instanceof Error ? e.message : e, 160) }; }
   }
 
   /** Question-driven investigation (bounded). The model chooses searches and reads; every step is a real retrieval. */
@@ -1183,9 +1224,30 @@ export class DossierEngine {
       retrieve: (req) => this.addEvidence(businessId, req),
       known: () => x.sources.filter((u) => u.role !== "competitor" && u.decision === "approved" && u.pageText).slice(0, 12).map((u) => ({ id: u.id, url: u.url, title: u.title, excerpt: u.pageText ?? "" })),
     });
-    const rec: Investigation = { id: `V${inv.length + 1}`, question: clip(question, 240), origin, at: this.now(), retrieved: out.retrieved.map((a) => ({ id: a.id, url: a.url, read: a.read, decision: a.decision })), notes: out.notes, steps: out.steps, stopReason: out.stopReason, concluded: out.concluded, ...(out.finding ? { finding: out.finding } : {}) };
-    inv.push(rec); this.save(x); await this.d.flush?.();
+    const approved = out.retrieved.filter((a) => a.read && a.decision === "approved").map((a) => a.id);
+    const known = x.sources.filter((u) => u.role !== "competitor" && u.decision === "approved" && u.pageText).map((u) => u.id);
+    const concluded = out.concluded === true && (approved.length > 0 || known.length > 0);
+    const support = approved.length ? approved : concluded ? known.slice(0, 8) : [];
+    const rec: Investigation = { id: `V${inv.length + 1}`, question: clip(question, 240), origin, at: this.now(), retrieved: out.retrieved.map((a) => ({ id: a.id, url: a.url, read: a.read, decision: a.decision })), notes: [...out.notes, ...(out.concluded && !concluded ? ["The model said the question was answered, but no approved source has been read, so it is not recorded as concluded."] : []), ...(!concluded && out.finding ? ["A finding was offered without approved evidence and was not recorded as fact."] : [])].slice(0, 8), steps: out.steps, stopReason: concluded ? "enough" : out.stopReason === "enough" ? "no_progress" : out.stopReason, concluded, approvedSourceIds: support, ...(concluded && out.finding ? { finding: out.finding } : {}) };
+    inv.push(rec);
+    if (approved.length) this.openHandoff(x, { from: "investigation", kind: "needs_evidence", detail: `Investigation ${rec.id} read approved sources ${approved.join(", ")} for: ${rec.question}`, sourceRefs: approved });
+    this.save(x); await this.d.flush?.();
+    if (approved.length && origin !== "chat") await this.replan(businessId, { kind: "handoff", ids: [rec.id], summary: `Investigation found approved sources (${approved.join(", ")}) for: ${rec.question}` });
     return rec;
+  }
+
+  private openHandoff(x: Dossier, h: Pick<Handoff, "from" | "kind" | "detail" | "sourceRefs"> & { fromEmployee?: string }): Handoff | null {
+    const hand = (x.handoffs ??= []);
+    if (hand.length >= 24) return null;
+    const rec: Handoff = { id: `H${hand.length + 1}`, from: h.from, ...(h.fromEmployee ? { fromEmployee: h.fromEmployee } : {}), kind: h.kind, detail: clip(h.detail, 300), sourceRefs: h.sourceRefs.slice(0, 8), at: this.now(), status: "open" };
+    hand.push(rec);
+    return rec;
+  }
+
+  private closeHandoff(x: Dossier, id: string | undefined, status: Handoff["status"], resolution: string): void {
+    const h = id ? (x.handoffs ?? []).find((o) => o.id === id) : undefined;
+    if (!h || h.status !== "open") return;
+    h.status = status; h.resolvedBy = "planner"; h.resolution = clip(resolution, 240);
   }
 
   /** The operator, in chat, challenges a finding or asks the planner to reconsider. Recorded, then evaluated. */
@@ -1208,7 +1270,7 @@ export class DossierEngine {
     if (this.drives.has(businessId) || this.active.has(businessId)) return { ok: false, reason: "research is running now" };
     if ((x.researchRound ?? 0) >= 5) return { ok: false, reason: "re-research limit reached" };
     const version = archiveVersion(x, this.now(), clip(reason, 200), { kind: "reresearch" });
-    for (const id of ["profile", "audit", "competitor_discovery", "competitors", "market", "swot", "growth", "pr", "campaign", "plan"] as StageId[]) {
+    for (const id of ARCHIVED_STAGES) {
       if (x.stages[id]?.output != null) archiveStageOutput(x, id, this.now(), `Archived before re-research: ${clip(reason, 160)}`, { versionId: version.id });
     }
     x.researchRound = (x.researchRound ?? 0) + 1;

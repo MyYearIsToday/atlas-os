@@ -1,7 +1,7 @@
 import type { ArchivedStage, Dossier, DossierVersion, StageId, StageRecord, StageRevision } from "../../src/orchestrator/dossier-types";
 
 /** Analytical sections whose previous conclusions must survive a revision or a fresh research pass. Research itself is retrieval, not a conclusion. */
-export const ARCHIVED_STAGES: readonly StageId[] = ["profile", "audit", "competitor_discovery", "competitors", "market", "swot", "growth", "pr", "campaign", "plan"];
+export const ARCHIVED_STAGES: readonly StageId[] = ["profile", "audit", "competitor_discovery", "competitors", "market", "swot", "insights", "growth", "pr", "campaign", "plan"];
 const MAX_VERSIONS = 12;
 const MAX_REVISION_LOG = 60;
 

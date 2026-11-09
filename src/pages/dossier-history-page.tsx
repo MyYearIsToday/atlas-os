@@ -4,7 +4,7 @@ import { PageIntro } from '@/components/atlas-shell';
 type StageView = { id: string; title: string; status: string; staleBecause?: string | null; priorVersions?: number; error?: string | null };
 type VersionView = { id: string; round: number; archivedAt: string; reason: string; kind: string; planChangeId: string | null; sourceDigest: Array<{ id: string; decision?: string }>; stages: Record<string, { status: string; output: unknown; sourceRefs?: string[] }> };
 type PlanView = { id: string; at: string; decision: string; reason: string; revised: string[]; stale: string[]; tasks: Array<{ title: string; assignedAI: string; status: string; error?: string }> };
-type DossierView = { businessId: string; status: string; researchRound?: number; stages: StageView[]; planLog: PlanView[]; history: VersionView[]; revisionLog: Array<{ id: string; stage: string; at: string; reason: string; planChangeId?: string }>; investigations: Array<{ id: string; question: string; finding?: string; stopReason?: string; retrieved?: Array<{ url: string; decision: string }> }> };
+type DossierView = { businessId: string; status: string; researchRound?: number; stages: StageView[]; planLog: PlanView[]; history: VersionView[]; revisionLog: Array<{ id: string; stage: string; at: string; reason: string; planChangeId?: string }>; revisions?: Record<string, { reason: string; pending: boolean; count: number }>; investigations: Array<{ id: string; question: string; finding?: string; stopReason?: string; concluded?: boolean; approvedSourceIds?: string[] }>; handoffs?: Array<{ id: string; from: string; fromEmployee?: string; kind: string; detail: string; status: string; resolution?: string }>; pipelineLink?: { crm: { status: string; stage: string; businessName: string; note: string }; client: { status: string; reason: string }; contentStack: { status: string; note: string; items: Array<{ title: string; channel: string; approval: string }> } } | null };
 
 export function DossierHistoryPage() {
   const [businessId, setBusinessId] = useState(() => new URLSearchParams(window.location.search).get('business') ?? '');
@@ -110,7 +110,35 @@ export function DossierHistoryPage() {
                   </ul>
                 </div>
               )}
-              {(dossier.revisionLog ?? []).length > 0 && <p className="mt-3 text-[11px] text-[#89a]">{dossier.revisionLog.length} section-level copies are kept, including any output that would otherwise have been the only record.</p>}
+              {(dossier.revisionLog ?? []).length > 0 && (
+                <ul className="mt-3 space-y-2 text-[12px] text-[#d5deea]">
+                  {dossier.revisionLog.slice(-12).map((entry) => (
+                    <li key={entry.id}><span className="text-white">{entry.stage}</span> {entry.reason} <span className="text-[#89a]">{entry.planChangeId ? `· ${entry.planChangeId}` : ''} {entry.at.slice(0, 16).replace('T', ' ')}</span></li>
+                  ))}
+                </ul>
+              )}
+            </section>
+            <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4">
+              <h2 className="text-[13px] font-semibold text-white">Handoffs</h2>
+              {(dossier.handoffs ?? []).length === 0 && <p className="mt-2 text-[12px] text-[#89a]">No specialist or investigation handoff has been recorded.</p>}
+              <ul className="mt-3 space-y-2 text-[12px] text-[#d5deea]">
+                {(dossier.handoffs ?? []).map((item) => (
+                  <li key={item.id}><span className="text-[#d4af37]">{item.status}</span> {item.from}{item.fromEmployee ? ` → ${item.fromEmployee}` : ''} · {item.kind}. {item.detail}{item.resolution ? <span className="mt-1 block text-[#89a]">{item.resolution}</span> : null}</li>
+                ))}
+              </ul>
+              {dossier.revisions && Object.keys(dossier.revisions).length > 0 && <p className="mt-3 text-[11px] text-[#89a]">Open revisions: {Object.entries(dossier.revisions).filter(([, value]) => value.pending).map(([id]) => id).join(', ') || 'none pending'}.</p>}
+            </section>
+            <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4">
+              <h2 className="text-[13px] font-semibold text-white">Scout, CRM, clients, content</h2>
+              {!dossier.pipelineLink && <p className="mt-2 text-[12px] text-[#89a]">No pipeline suggestion yet. It is written only when the action plan completes, and it does not create a lead, a client, or a published asset.</p>}
+              {dossier.pipelineLink && (
+                <ul className="mt-3 space-y-2 text-[12px] text-[#d5deea]">
+                  <li>Scout record stays the source. Suggested CRM stage: {dossier.pipelineLink.crm.stage} for {dossier.pipelineLink.crm.businessName}. {dossier.pipelineLink.crm.note}</li>
+                  <li>Client: {dossier.pipelineLink.client.status}. {dossier.pipelineLink.client.reason}</li>
+                  <li>Content stack: {dossier.pipelineLink.contentStack.status}. {dossier.pipelineLink.contentStack.note}</li>
+                  {dossier.pipelineLink.contentStack.items.map((item) => <li key={`${item.channel}-${item.title}`}>{item.title} · {item.channel} · {item.approval}</li>)}
+                </ul>
+              )}
             </section>
             <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4">
               <h2 className="text-[13px] font-semibold text-white">Investigations</h2>

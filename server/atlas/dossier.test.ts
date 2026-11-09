@@ -11,6 +11,7 @@ export const GOOD: Record<string, unknown> = {
   dossier_market: { audience: [{ text: "Students", basis: "hypothesis", sourceRefs: [] }], localContext: [], trends: [], opportunities: [{ title: "Event content", rationale: "r", basis: "hypothesis" }], threats: [], barriers: [], unknowns: ["demand data"], estimates: [{ description: "invented market size", method: "guess", uncertainty: "high", sourceRefs: [] }] },
   dossier_campaign: { objective: "o", pillars: [{ name: "Events", rationale: "r" }], channels: [{ channel: "Instagram", why: "w", constraints: "c" }], campaigns: [{ name: "Launch", objective: "o", audience: "a", message: "m", callToAction: "c", channels: ["Instagram"], kpis: [{ metric: "reach", measurement: "insights" }] }], sequence: [{ activity: "Draft", dependsOn: "approval" }], content: [{ campaign: "Launch", platform: "Instagram", format: "post", draft: "Hello Legon", creativeBrief: "b" }], assumptions: [] },
   dossier_swot: { strengths: [{ text: "Brand tied to UGBS", basis: "verified", sourceRefs: ["S1"], quote: "official student association of the University of Ghana Business School" }], weaknesses: [], opportunities: [{ text: "Event content", basis: "hypothesis", sourceRefs: [] }], threats: [{ text: "Other associations", basis: "unknown", sourceRefs: [] }] },
+  dossier_insights: { summary: "Mesa UGBS is a student association with a thin web presence in the approved sources.", findings: [{ title: "No own website", implication: "A later recommendation to launch a website is a hypothesis, because no site was found in the approved sources.", basis: "hypothesis", sourceRefs: [] }], unknowns: ["Membership size was not stated."] },
   dossier_growth: { recommendations: [{ title: "Launch a website", kind: "experiment", area: "visibility", currentSituation: "no website was found in the approved sources", rationale: "A hypothesis: without a website, students searching for the association cannot find its events or contacts.", priority: "high", effort: "medium", intendedOutcome: "more event enquiries from search", successMetric: "monthly enquiries from the site", nextSteps: ["Draft a one-page site outline for operator review"], basis: "hypothesis", sourceRefs: [] }] },
   dossier_pr: { narrative: "A student-led association positioned within a university community.", positioning: "Student-led voice of the business school community.", newsworthy: [{ angle: "Annual programme announcement", whyNewsworthy: "Campus media regularly cover student association programmes.", timing: "before the semester", basis: "hypothesis", sourceRefs: [] }], stakeholders: [{ group: "Students", interest: "Events and career access", approach: "Direct campus channels" }], mediaOpportunities: [{ outletType: "Campus and student media", angle: "Student leadership story", rationale: "Closest audience to the association." }], pressReleaseConcepts: [], pitches: [], thoughtLeadership: [], reputationRisks: [], crisisReadiness: "Prepare a holding statement process.", unknowns: ["Existing media coverage was not found."] },
   dossier_plan: { dossierSummary: "Summary.", actionPlan: [{ title: "Build site", description: "d", owner: "Atlas", timeframe: "30 days" }], followUps: [{ title: "Draft outreach to the association", description: "draft", assignedAI: "closer", external: true }, { title: "Competitor scan", description: "scan", assignedAI: "finance", external: false }], limitations: ["No score"] },
@@ -52,15 +53,15 @@ test("full chain: research -> profile -> audit -> SWOT -> growth -> plan, struct
   const d = await start(c);
   assert.equal(d.status, "completed");
   assert.equal(d.sourceApproval?.mode, "auto", "no operator approval was needed");
-  assert.deepEqual(STAGES.map((s) => d.stages[s.id].status), Array(11).fill("completed"));
-  assert.deepEqual(c.calls, ["dossier_profile", "dossier_audit", "dossier_competitors", "dossier_market", "dossier_swot", "dossier_growth", "dossier_pr", "dossier_campaign", "dossier_plan"]);
+  assert.deepEqual(STAGES.map((s) => d.stages[s.id].status), Array(12).fill("completed"));
+  assert.deepEqual(c.calls, ["dossier_profile", "dossier_audit", "dossier_competitors", "dossier_market", "dossier_swot", "dossier_insights", "dossier_growth", "dossier_pr", "dossier_campaign", "dossier_plan"]);
   assert.ok(d.sources.length >= 1 && d.sources[0].id === "S1" && d.sources[0].confidence === "checked" && d.sources[0].retrievedAt);
   const facts = (d.stages.profile.output as { facts: Array<{ claim: string; basis: string }> }).facts;
   assert.equal(facts[0].basis, "verified");
   assert.equal(facts[1].basis, "hypothesis", "a 'verified' claim citing a non-existent source is downgraded");
   // each stage mission is internal, Auto, linked to the business, and carries the previous stage's output
   const stageTasks = c.deps.missionQueue.getSnapshot().filter((t) => t.missionType !== "dossier_followup");
-  assert.equal(stageTasks.length, 9);
+  assert.equal(stageTasks.length, 10);
   assert.ok(stageTasks.every((t) => t.clientId === "b1" && t.approvalRequired === "Auto"));
   assert.match(stageTasks.find((t) => t.missionType === "dossier_swot")!.description, /Thin web presence/);
   // follow-ups: never auto, external flagged as draft-only, finance coerced away
@@ -78,7 +79,7 @@ test("repeated start is idempotent: no second dossier, mission or follow-up", as
   c.engine.ensure(biz()); c.engine.kick("b1"); await c.engine.idle();
   await c.engine.tick(); 
   assert.equal(c.deps.missionQueue.getSnapshot().length, before);
-  assert.equal(c.calls.length, 9);
+  assert.equal(c.calls.length, 10);
 });
 
 test("provider failure is visible, never a hot loop, and gives up after bounded attempts", async () => {

@@ -74,7 +74,15 @@ export async function investigate(question: string, deps: InvestigatorDeps, maxS
   for (let i = 0; i < maxSteps; i++) {
     const d = parseStepDecision(await deps.decide(buildStepPrompt(question, deps, steps, retrieved, maxSteps - i)).catch(() => null));
     if (!d) { notes.push("The planner returned no usable decision."); return { steps, stopReason: steps.length ? "no_progress" : "planner_unavailable", concluded: false, retrieved, notes: notes.slice(0, 6) }; }
-    if (d.decision === "stop") { steps.push({ action: "stop", why: d.why, newSources: 0 }); return { steps, stopReason: d.enough ? "enough" : "no_progress", concluded: d.enough, ...(d.finding ? { finding: d.finding } : {}), retrieved, notes: notes.slice(0, 6) }; }
+    if (d.decision === "stop") {
+      const approved = retrieved.filter((a) => a.read && a.decision === "approved");
+      const claimed = d.enough === true;
+      const concluded = claimed && (approved.length > 0 || deps.known().length > 0);
+      if (claimed && !concluded) notes.push("The model said this was answered, but no approved page is available, so it is not concluded.");
+      if (!concluded && d.finding) notes.push("A finding was offered without approved evidence and was not kept.");
+      steps.push({ action: "stop", why: d.why, newSources: 0 });
+      return { steps, stopReason: concluded ? "enough" : "no_progress", concluded, ...(concluded && d.finding ? { finding: d.finding } : {}), retrieved, notes: notes.slice(0, 6) };
+    }
     if (d.decision === "search") {
       const key = d.query!.toLowerCase();
       if (seenQueries.has(key)) { notes.push("The planner repeated a search; stopped."); return { steps, stopReason: "no_progress", concluded: false, retrieved, notes: notes.slice(0, 6) }; }

@@ -1,5 +1,5 @@
 /** Persisted per-business dossier: staged internal research -> audit -> SWOT -> growth -> action plan. Work product only; never evidence. */
-export type StageId = "research" | "profile" | "audit" | "competitor_discovery" | "competitors" | "market" | "swot" | "growth" | "pr" | "campaign" | "plan";
+export type StageId = "research" | "profile" | "audit" | "competitor_discovery" | "competitors" | "market" | "swot" | "insights" | "growth" | "pr" | "campaign" | "plan";
 export type StageStatus = "pending" | "running" | "completed" | "failed" | "blocked";
 
 /** One attempt to get a usable structured output for an AI stage. Every attempt is kept, failed ones included. */
@@ -207,12 +207,14 @@ export interface Dossier {
   history?: DossierVersion[];
   /** Per-stage outputs taken before a section was replaced, linked to the plan change that caused it. */
   revisionLog?: StageRevision[];
+  /** Suggested next place in Scout → CRM → Clients → content. A suggestion only; nothing is created or sent. */
+  pipelineLink?: PipelineLink;
   researchRound?: number;
 }
 
 export interface Handoff {
   id: string;
-  from: StageId | "chat";
+  from: StageId | "chat" | "planner" | "investigation";
   fromEmployee?: string;
   kind: "needs_evidence" | "challenge" | "alternative_direction";
   detail: string;
@@ -232,6 +234,8 @@ export interface Investigation {
   steps?: InvestigationStep[];
   stopReason?: "enough" | "budget" | "no_progress" | "planner_unavailable" | "nothing_to_do";
   concluded?: boolean;
+  /** Approved sources this investigation actually read. A finding without one of these is not evidence. */
+  approvedSourceIds?: string[];
   finding?: string;
 }
 export interface InvestigationStep { action: "search" | "read" | "stop"; target?: string; why: string; newSources: number }
@@ -289,4 +293,10 @@ export interface DossierVersion {
   limitations?: string[];
   planDecisions?: Array<{ id: string; at: string; decision: string; reason: string; revised: StageId[] }>;
   investigations?: Array<{ id: string; question: string; at: string; finding?: string; stopReason?: string }>;
+}
+export interface PipelineLink {
+  scoutBusinessId: string;
+  crm: { status: "suggested"; stage: "Prospect"; businessName: string; category: string | null; location: string | null; website: string | null; note: string };
+  client: { status: "not_created"; reason: string };
+  contentStack: { status: "drafts_only" | "none"; items: Array<{ title: string; channel: string; approval: "Approval Required" }>; note: string };
 }

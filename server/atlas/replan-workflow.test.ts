@@ -53,7 +53,7 @@ test("planner revision archives the previous output and regenerates only depende
   assert.match(JSON.stringify(after.stages.swot.output), /Revised brand position/);
   assert.equal(JSON.stringify(after.stages.swot.history?.[0].output), oldSwot);
   const rerun = order.filter((x) => x.endsWith("#2")).map((x) => x.split("#")[0]);
-  assert.deepEqual(rerun, ["dossier_swot", "dossier_growth", "dossier_pr", "dossier_campaign", "dossier_plan"]);
+  assert.deepEqual(rerun, ["dossier_swot", "dossier_insights", "dossier_growth", "dossier_pr", "dossier_campaign", "dossier_plan"]);
   assert.equal(rerun.includes("dossier_profile"), false);
   const again = await c.engine.replan("b1", { kind: "operator", ids: ["evidence-1"], summary: "A newly read page contradicts the SWOT weakness." });
   assert.equal(again, change);
@@ -147,7 +147,7 @@ test("a failed revision can resume without losing history, and re-research keeps
   assert.equal(archivedRound.researchRound, 1);
   assert.equal(archivedRound.stages.profile.status, "pending");
   const snap = archivedRound.history?.find((h) => h.kind === "reresearch") ?? archivedRound.history?.at(-1);
-  for (const id of ["profile", "audit", "competitor_discovery", "competitors", "market", "swot", "growth", "pr", "campaign", "plan"] as StageId[]) assert.ok(snap?.stages[id], id);
+  for (const id of ["profile", "audit", "competitor_discovery", "competitors", "market", "swot", "insights", "growth", "pr", "campaign", "plan"] as StageId[]) assert.ok(snap?.stages[id], id);
   assert.ok((archivedRound.revisionLog ?? []).some((r) => r.stage === "plan"));
   assert.equal(archivedRound.execution, undefined);
 });
@@ -155,7 +155,7 @@ test("a failed revision can resume without losing history, and re-research keeps
 test("the PR stage runs after growth and before campaign, and follow-ups stay behind approval", async () => {
   const c = setup();
   const d = await start(c);
-  assert.deepEqual(c.calls, ["dossier_profile", "dossier_audit", "dossier_competitors", "dossier_market", "dossier_swot", "dossier_growth", "dossier_pr", "dossier_campaign", "dossier_plan"]);
+  assert.deepEqual(c.calls, ["dossier_profile", "dossier_audit", "dossier_competitors", "dossier_market", "dossier_swot", "dossier_insights", "dossier_growth", "dossier_pr", "dossier_campaign", "dossier_plan"]);
   const pr = STAGES.find((s) => s.id === "pr")!;
   const campaign = STAGES.find((s) => s.id === "campaign")!;
   assert.deepEqual(pr.dependsOn, ["growth"]);
