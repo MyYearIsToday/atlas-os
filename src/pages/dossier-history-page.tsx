@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { PageIntro } from '@/components/atlas-shell';
 
+type FeedbackView = { id: string; workerId: string; stageId: string; type: string; title: string; observation: string; reasoning: string; businessImpact: string; affectedStages: string[]; evidenceRefs: string[]; basis: string; confidence: string; researchQuestions: string[]; recommendedSpecialist?: string; status: string; resolution?: string; handoffId?: string; investigationIds?: string[]; planChangeIds?: string[]; missionTaskIds?: string[]; notes?: string[]; proposedAction?: { kind: string; detail: string } };
+type CompletionView = { state: string; reasons: string[]; unresolved: Array<{ kind: string; ref: string; detail: string }>; plannerNote?: string; assessedBy: string; at: string };
 type StageView = { id: string; title: string; status: string; staleBecause?: string | null; priorVersions?: number; error?: string | null };
 type VersionView = { id: string; round: number; archivedAt: string; reason: string; kind: string; planChangeId: string | null; sourceDigest: Array<{ id: string; decision?: string }>; stages: Record<string, { status: string; output: unknown; sourceRefs?: string[] }> };
-type PlanView = { id: string; at: string; decision: string; reason: string; revised: string[]; stale: string[]; tasks: Array<{ title: string; assignedAI: string; status: string; error?: string }> };
-type DossierView = { businessId: string; status: string; researchRound?: number; stages: StageView[]; planLog: PlanView[]; history: VersionView[]; revisionLog: Array<{ id: string; stage: string; at: string; reason: string; planChangeId?: string }>; revisions?: Record<string, { reason: string; pending: boolean; count: number }>; investigations: Array<{ id: string; question: string; finding?: string; stopReason?: string; concluded?: boolean; approvedSourceIds?: string[] }>; handoffs?: Array<{ id: string; from: string; fromEmployee?: string; kind: string; detail: string; status: string; resolution?: string }>; pipelineLink?: { crm: { status: string; stage: string; businessName: string; note: string }; client: { status: string; reason: string }; contentStack: { status: string; note: string; items: Array<{ title: string; channel: string; approval: string }> } } | null };
+type PlanView = { id: string; at: string; decision: string; reason: string; evaluated?: boolean; trigger?: { kind: string; ids: string[]; feedbackIds?: string[]; investigationIds?: string[] }; feedbackVerdicts?: Array<{ feedbackId: string; verdict: string; reason: string }>; revised: string[]; stale: string[]; tasks: Array<{ title: string; assignedAI: string; status: string; error?: string }> };
+type DossierView = { businessId: string; status: string; researchRound?: number; stages: StageView[]; planLog: PlanView[]; history: VersionView[]; revisionLog: Array<{ id: string; stage: string; at: string; reason: string; planChangeId?: string }>; revisions?: Record<string, { reason: string; pending: boolean; count: number }>; feedback?: FeedbackView[]; completion?: CompletionView | null; investigations: Array<{ id: string; handoffId?: string; planChangeId?: string; feedbackId?: string; question: string; finding?: string; stopReason?: string; concluded?: boolean; approvedSourceIds?: string[] }>; handoffs?: Array<{ id: string; investigationId?: string; feedbackId?: string; planChangeId?: string; from: string; fromEmployee?: string; kind: string; detail: string; status: string; resolution?: string }>; pipelineLink?: { crm: { status: string; stage: string; businessName: string; note: string }; client: { status: string; reason: string }; contentStack: { status: string; note: string; items: Array<{ title: string; channel: string; approval: string }> } } | null };
 
 export function DossierHistoryPage() {
   const [businessId, setBusinessId] = useState(() => new URLSearchParams(window.location.search).get('business') ?? '');
@@ -38,6 +40,15 @@ export function DossierHistoryPage() {
     } finally { setLoading(false); }
   }
 
+  async function decide(feedbackId: string, decision: 'accept' | 'dismiss' | 'reevaluate') {
+    if (!dossier) return;
+    try {
+      const r = await fetch(`/api/atlas/dossiers/${encodeURIComponent(dossier.businessId)}/feedback/${encodeURIComponent(feedbackId)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision }) });
+      if (!r.ok) { const body = await r.json().catch(() => ({})) as { message?: string }; setError(body.message ?? 'That decision could not be recorded.'); return; }
+      await load(dossier.businessId);
+    } catch { setError('The dossier service is not reachable from this page.'); }
+  }
+  const openFeedback = (dossier?.feedback ?? []).filter((f) => ['deferred', 'open', 'awaiting_reevaluation', 'investigating'].includes(f.status));
   const version = dossier?.history.find((item) => item.id === versionId) ?? dossier?.history.at(-1) ?? null;
 
   return (
@@ -74,6 +85,53 @@ export function DossierHistoryPage() {
             </ul>
           </section>
           <div className="space-y-4">
+            <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4" data-testid="section-completion">
+              <h2 className="text-[13px] font-semibold text-white">Is the work complete?</h2>
+              {!dossier.completion && <p className="mt-2 text-[12px] text-[#89a]">Not assessed yet. It is judged when every section has run.</p>}
+              {dossier.completion && (
+                <div className="mt-2 text-[12px] text-[#d5deea]">
+                  <p><span className="text-[#d4af37]">{dossier.completion.state.replace('_', ' ')}</span> <span className="text-[#89a]">· {dossier.completion.assessedBy} · {dossier.completion.at.slice(0, 16).replace('T', ' ')}</span></p>
+                  {dossier.completion.plannerNote && <p className="mt-1">Planner: {dossier.completion.plannerNote}</p>}
+                  <ul className="mt-2 list-disc space-y-1 pl-4 text-[#c5d0dc]">{dossier.completion.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
+                  {dossier.completion.unresolved.length > 0 && <ul className="mt-2 space-y-1 text-[#e0b66a]">{dossier.completion.unresolved.map((u, i) => <li key={i}>{u.kind} {u.ref}: {u.detail}</li>)}</ul>}
+                </div>
+              )}
+            </section>
+            <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4" data-testid="section-worker-feedback">
+              <h2 className="text-[13px] font-semibold text-white">Worker discoveries and challenges</h2>
+              {(dossier.feedback ?? []).length === 0 && <p className="mt-2 text-[12px] text-[#89a]">No worker has raised a finding, challenge or research request.</p>}
+              <ul className="mt-3 space-y-3 text-[12px] text-[#d5deea]">
+                {(dossier.feedback ?? []).map((f) => (
+                  <li key={f.id}>
+                    <span className="text-[#d4af37]">{f.status.replace('_', ' ')}</span> <span className="text-white">{f.id} · {f.type.replace('_', ' ')}</span> from {f.workerId} on {f.stageId} · {f.basis}, {f.confidence} confidence: {f.title}
+                    <span className="mt-1 block text-[#c5d0dc]">{f.observation}</span>
+                    <span className="mt-1 block text-[#89a]">Why it matters: {f.reasoning} Impact: {f.businessImpact}{f.affectedStages.length ? ` Affects ${f.affectedStages.join(', ')}.` : ''}</span>
+                    {f.evidenceRefs.length > 0 && <span className="mt-1 block text-[#89a]">Evidence: {f.evidenceRefs.join(', ')}</span>}
+                    {f.researchQuestions.length > 0 && <span className="mt-1 block text-[#89a]">Research requested: {f.researchQuestions.join(' | ')}{f.recommendedSpecialist ? ` (suggests ${f.recommendedSpecialist})` : ''}</span>}
+                    {f.resolution && <span className="mt-1 block">Planner decision: {f.resolution}</span>}
+                    <span className="mt-1 block text-[11px] text-[#89a]">{[f.handoffId && `handoff ${f.handoffId}`, f.investigationIds?.length && `investigation ${f.investigationIds.join(', ')}`, f.planChangeIds?.length && `plan ${f.planChangeIds.join(', ')}`, f.missionTaskIds?.length && `specialist mission ${f.missionTaskIds.join(', ')}`].filter(Boolean).join(' · ')}</span>
+                    {f.notes?.map((n, i) => <span key={i} className="mt-1 block text-[11px] text-[#89a]">{n}</span>)}
+                  </li>
+                ))}
+              </ul>
+              {openFeedback.length > 0 && (
+                <div className="mt-4 border-t border-[#233247] pt-3">
+                  <p className="text-[12px] text-white">Unresolved items</p>
+                  <ul className="mt-2 space-y-2 text-[12px] text-[#d5deea]">
+                    {openFeedback.map((f) => (
+                      <li key={f.id} className="flex flex-wrap items-center gap-2">
+                        <span>{f.id} {f.title}</span>
+                        {f.status === 'deferred' && (<>
+                          <button type="button" className="rounded border border-[#2a3d55] px-2 py-0.5 text-[11px]" onClick={() => void decide(f.id, 'accept')}>Accept</button>
+                          <button type="button" className="rounded border border-[#2a3d55] px-2 py-0.5 text-[11px]" onClick={() => void decide(f.id, 'dismiss')}>Dismiss</button>
+                          <button type="button" className="rounded border border-[#2a3d55] px-2 py-0.5 text-[11px]" onClick={() => void decide(f.id, 'reevaluate')}>Ask the planner again</button>
+                        </>)}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </section>
             <section className="rounded-xl border border-[#233247] bg-[#0d1a2b]/90 p-4">
               <h2 className="text-[13px] font-semibold text-white">Why the plan changed</h2>
               {(dossier.planLog ?? []).length === 0 && <p className="mt-2 text-[12px] text-[#89a]">No planner revision has been recorded.</p>}
@@ -81,6 +139,8 @@ export function DossierHistoryPage() {
                 {(dossier.planLog ?? []).map((change) => (
                   <li key={change.id} className="text-[12px] text-[#d5deea]">
                     <span className="text-[#d4af37]">{change.decision}</span> {change.reason}
+                    {change.evaluated === false && <span className="mt-1 block text-[#e0b66a]">Not evaluated: the planner gave no usable decision.</span>}
+                    {(change.feedbackVerdicts ?? []).map((v) => <span key={v.feedbackId} className="mt-1 block text-[#89a]">{v.feedbackId}: {v.verdict}. {v.reason}</span>)}
                     {change.revised.length > 0 && <span className="mt-1 block text-[#89a]">Revised: {change.revised.join(', ')}. Regenerated from that: {change.stale.join(', ') || 'none'}.</span>}
                     {change.tasks.length > 0 && <span className="mt-1 block text-[#89a]">Specialist work: {change.tasks.map((task) => `${task.title} (${task.assignedAI}, ${task.status}${task.error ? `: ${task.error}` : ''})`).join('; ')}</span>}
                   </li>
@@ -123,7 +183,7 @@ export function DossierHistoryPage() {
               {(dossier.handoffs ?? []).length === 0 && <p className="mt-2 text-[12px] text-[#89a]">No specialist or investigation handoff has been recorded.</p>}
               <ul className="mt-3 space-y-2 text-[12px] text-[#d5deea]">
                 {(dossier.handoffs ?? []).map((item) => (
-                  <li key={item.id}><span className="text-[#d4af37]">{item.status}</span> {item.from}{item.fromEmployee ? ` → ${item.fromEmployee}` : ''} · {item.kind}. {item.detail}{item.resolution ? <span className="mt-1 block text-[#89a]">{item.resolution}</span> : null}</li>
+                  <li key={item.id}><span className="text-[#d4af37]">{item.status}</span> {item.from}{item.fromEmployee ? ` → ${item.fromEmployee}` : ''} · {item.kind.replace('_', ' ')}{[item.feedbackId && ` · feedback ${item.feedbackId}`, item.investigationId && ` · investigation ${item.investigationId}`, item.planChangeId && ` · plan ${item.planChangeId}`].filter(Boolean).join('')}. {item.detail}{item.resolution ? <span className="mt-1 block text-[#89a]">{item.resolution}</span> : null}</li>
                 ))}
               </ul>
               {dossier.revisions && Object.keys(dossier.revisions).length > 0 && <p className="mt-3 text-[11px] text-[#89a]">Open revisions: {Object.entries(dossier.revisions).filter(([, value]) => value.pending).map(([id]) => id).join(', ') || 'none pending'}.</p>}
@@ -145,7 +205,7 @@ export function DossierHistoryPage() {
               {(dossier.investigations ?? []).length === 0 && <p className="mt-2 text-[12px] text-[#89a]">No question-driven investigation has been run.</p>}
               <ul className="mt-3 space-y-2 text-[12px] text-[#d5deea]">
                 {(dossier.investigations ?? []).map((item) => (
-                  <li key={item.id}>{item.question}{item.finding ? ` — ${item.finding}` : ''} <span className="text-[#89a]">{item.stopReason ?? ''}</span></li>
+                  <li key={item.id}>{item.id}: {item.question}{item.finding ? ` — ${item.finding}` : ''}{item.handoffId ? ` · handoff ${item.handoffId}` : ''}{item.planChangeId ? ` · plan ${item.planChangeId}` : ''}{item.feedbackId ? ` · for feedback ${item.feedbackId}` : ''} <span className="text-[#89a]">{item.stopReason ?? ''}</span></li>
                 ))}
               </ul>
             </section>

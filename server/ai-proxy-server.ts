@@ -38,6 +38,7 @@ import { PrototypeService, inferMissionType, MISSION_TYPE } from "./atlas/protot
 import { parseResearchRequest } from "./atlas/research-request";
 import { ProcessController, buildCandidateView, readDossier, readMissionResult, startCandidate, type ActionContext } from "./atlas/scout-actions";
 import { DossierEngine, missionContext } from "./atlas/dossier";
+import { limitsFromEnv } from "./atlas/worker-feedback";
 import { ChatService, parseProposalRequest, type ChatModel } from "./atlas/chat";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 
@@ -415,6 +416,16 @@ export function createAiProxyServer(
           const r = await dossierEngine.reresearch(id, typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim() : "operator requested a fresh pass");
           if (r.ok) { dossierEngine.kick(id); await atlasPipeline.persistence?.flush(); payload = { ok: true, note: "Research is running again. The earlier version is kept in the dossier history." }; }
           else { status = r.reason === "no dossier" ? 404 : 409; payload = { ok: false, error: "cannot_reresearch", message: r.reason }; }
+        } else if (method === "POST" && /^\/api\/atlas\/dossiers\/[A-Za-z0-9_-]{1,80}\/feedback\/F\d{1,4}$/.test(url)) {
+          const parts = url.split("/");
+          const body = (await readJsonBody(req)) as { decision?: unknown; note?: unknown } | null;
+          const decision = body?.decision === "accept" || body?.decision === "dismiss" || body?.decision === "reevaluate" ? body.decision : null;
+          if (!decision) { status = 400; payload = { ok: false, error: "invalid_decision", message: "decision must be accept, dismiss or reevaluate" }; }
+          else {
+            const r = await dossierEngine.resolveFeedback(parts[4], parts[6], decision, typeof body?.note === "string" ? body.note : undefined);
+            if (r.ok) { dossierEngine.kick(parts[4]); await atlasPipeline.persistence?.flush(); payload = { ok: true }; }
+            else { status = r.reason === "no dossier" || r.reason === "no such feedback" ? 404 : 409; payload = { ok: false, error: "cannot_resolve_feedback", message: r.reason }; }
+          }
         } else if (method === "GET" && url === "/api/scout/candidates") {
           payload = { durable: !!atlasPipeline.persistence, discovery: scoutDiscoveryStatus, items: buildCandidateView({ discovered: scoutPipeline.repository.list(), pipeline: { deps: atlasPipeline.deps, autonomy: atlasPipeline.autonomy } }) };
         } else if (method === "POST" && url === "/api/scout/candidates/start") {
@@ -716,7 +727,7 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       const execute = createInternalExecutor({ pipeline: pipelineDeps.store, collectors: pipelineDeps.collectors ?? [], missionQueue: pipelineDeps.missionQueue, lifecycle, dispatcher: orchestrator, prospects, delivery, revenue });
       const cycleDeps = { policy: defaultAutonomyPolicy, lifecycle, pipeline: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, ledger, execute, metricInputs, persistenceHealthy: () => persistence?.health().ok ?? true };
       const searchProvider = new TavilyWebDiscoveryProvider();
-      dossierEngine = new DossierEngine({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 6 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })),
+      dossierEngine = new DossierEngine({ limits: limitsFromEnv(process.env), store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 6 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })),
         fetchDoc: safeFetch,
         // Research-loop planner: the same free-routed Workforce as the dossier stages, only when mission execution is enabled. Without it the loop uses its deterministic planner.
         plan: executionEnabled && providers?.workforce ? async (prompt) => {
