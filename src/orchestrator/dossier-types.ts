@@ -236,7 +236,7 @@ export type FeedbackStatus = "open" | "accepted" | "rejected" | "investigating" 
 export interface WorkerFeedback {
   id: string;
   workerId: string;
-  stageId: StageId;
+  stageId: StageId | "unassigned";
   type: FeedbackType;
   title: string;
   observation: string;
@@ -259,6 +259,9 @@ export interface WorkerFeedback {
   unresolved?: string[];
   /** Links. */
   stageGeneration?: number;
+  /** Set when the feedback came from an ordinary (non-stage) mission: the mission that produced it. */
+  sourceTaskId?: string;
+  sourceMissionType?: string;
   handoffId?: string;
   investigationIds?: string[];
   planChangeIds?: string[];
@@ -269,10 +272,11 @@ export interface WorkerFeedback {
 
 export interface CompletionAssessment {
   at: string;
-  state: "in_progress" | "complete" | "blocked" | "awaiting_decision";
+  /** complete_with_limitations: finished, with limits the planner or code judged non-material and disclosed. awaiting_investigation: research the planner ordered has not come back. */
+  state: "in_progress" | "awaiting_investigation" | "complete" | "complete_with_limitations" | "blocked" | "awaiting_decision";
   /** Plain statements of why this state was chosen. */
   reasons: string[];
-  unresolved: Array<{ kind: "stage" | "feedback" | "handoff" | "contradiction" | "limitation" | "stale"; ref: string; detail: string }>;
+  unresolved: Array<{ kind: "stage" | "feedback" | "handoff" | "contradiction" | "limitation" | "stale" | "investigation" | "specialist" | "unsupported"; ref: string; detail: string; /** Material items block completion; disclosed ones are carried as stated limitations. */ material?: boolean }>;
   /** The planner's own explanation, when a planner model was available and there was something to judge. */
   plannerNote?: string;
   assessedBy: "code" | "planner";
@@ -281,7 +285,7 @@ export interface CompletionAssessment {
 
 export interface Handoff {
   id: string;
-  from: StageId | "chat" | "planner" | "investigation";
+  from: StageId | "chat" | "planner" | "investigation" | "unassigned";
   fromEmployee?: string;
   kind: "needs_evidence" | "challenge" | "alternative_direction" | "finding" | "dependency_warning" | "completion_assessment";
   /** Explicit links. The investigation or worker feedback that produced this handoff, and the plan change that evaluated it. */

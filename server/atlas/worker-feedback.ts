@@ -38,6 +38,17 @@ const BASES = new Set(["observed", "interpretation", "hypothesis", "unknown"]);
 const ACTIONS = new Set(["none", "investigate", "revise_stage", "add_task", "consult_specialist", "reopen_downstream"]);
 const SPECIALISTS = new Set(["scout", "builder", "operator", "closer"]);
 const STAGE_IDS = new Set<string>(["audit", "competitor_discovery", "competitors", "market", "swot", "insights", "growth", "pr", "campaign", "plan", "profile", "research"]);
+/** Mission purpose → one section. Ambiguous purposes are omitted on purpose. Titles are never used. */
+const PURPOSE_STAGE: Record<string, StageId> = { competitor_analysis: "competitors", market_analysis: "market" };
+function asStage(v: unknown): StageId | null { return typeof v === "string" && STAGE_IDS.has(v) ? v as StageId : null; }
+function attributeOrdinaryStage(c: ParseCtx, affected: StageId[], itemTarget: unknown): StageId | "unassigned" {
+  if (affected[0]) return affected[0];
+  const meta = asStage(c.targetStage) ?? asStage(itemTarget);
+  if (meta && c.known.has(meta)) return meta;
+  const purpose = asStage(c.source?.missionType) ?? PURPOSE_STAGE[c.source?.missionType ?? ""];
+  if (purpose && c.known.has(purpose)) return purpose;
+  return "unassigned";
+}
 const clip = (v: unknown, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
 const tokens = (s: string) => new Set(norm(s).split(" ").filter((w) => w.length > 3));
@@ -60,16 +71,62 @@ export const FEEDBACK_CLAUSE = [
   "Use challenge when evidence contradicts an earlier section or a claim is unsupported. You propose; the planner decides. Never present an unsupported statement as observed.",
 ].join(" ");
 
+/** Same contract for ordinary missions whose output is prose: an optional trailing marker line carrying the JSON list. */
+export const FEEDBACK_MARKER = "ATLAS_FEEDBACK_JSON:";
+export const FEEDBACK_CLAUSE_PROSE = [
+  `OPTIONAL WORKER FEEDBACK. Only if, while doing this assignment, you noticed something the planner should act on (a meaningful discovery, a conclusion in the dossier that the evidence contradicts, a claim that needs more evidence, a better direction, a section that new information affects, or a doubt that your own work is complete), end your answer with one final line starting with ${FEEDBACK_MARKER} followed by a JSON array.`,
+  "If there is nothing meaningful to report, add nothing at all; do not pad. Each entry uses exactly this contract:",
+  FEEDBACK_CLAUSE.replace(/^OPTIONAL KEY "workerFeedback" \(array, max 4\)\. Add an entry ONLY when you noticed something the planner should act on; use \[\] when there is nothing meaningful\. Do not pad\. Each entry: /, "Entry: "),
+  "Cite only approved source ids that appear in the context. Do not name businesses, sources or relationships that are not in the context.",
+].join(" ");
+
+/** Pulls the optional trailing feedback array out of a prose output. A marker with no complete array is a withheld payload, not a successful extract. */
+export const FEEDBACK_EXTRACT_LIMIT = 20_000;
+export interface ProseFeedbackExtract { items: unknown[] | null; withheld?: string }
+export function readProseFeedback(text: string): ProseFeedbackExtract | null {
+  const i = text.lastIndexOf(FEEDBACK_MARKER);
+  if (i < 0) return null;
+  const rest = text.slice(i + FEEDBACK_MARKER.length);
+  const start = rest.indexOf("[");
+  if (start < 0) return { items: null, withheld: "A worker-feedback marker was present but no JSON array followed it. Nothing was extracted." };
+  let depth = 0, inStr = false, esc = false;
+  const end = Math.min(rest.length, FEEDBACK_EXTRACT_LIMIT);
+  for (let k = start; k < end; k++) {
+    const ch = rest[k];
+    if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) {
+        try {
+          const v = JSON.parse(rest.slice(start, k + 1));
+          if (!Array.isArray(v)) return { items: null, withheld: "The worker-feedback payload was JSON but not an array. It was not extracted." };
+          return { items: v };
+        } catch { return { items: null, withheld: "The worker-feedback JSON could not be parsed. It was not treated as extracted." }; }
+      }
+    }
+  }
+  const oversized = rest.length > FEEDBACK_EXTRACT_LIMIT;
+  return { items: null, withheld: oversized
+    ? `Worker feedback exceeded ${FEEDBACK_EXTRACT_LIMIT} characters before the JSON array closed. It was not parsed and was not counted as extracted.`
+    : "The worker-feedback JSON array was truncated before it closed. It was not parsed and was not counted as extracted." };
+}
+export function extractProseFeedback(text: string): unknown[] | null {
+  const read = readProseFeedback(text);
+  return read && !read.withheld ? read.items : null;
+}
+
 export interface FeedbackParse { accepted: WorkerFeedback[]; deferred: WorkerFeedback[]; rejected: Array<{ title: string; reason: string }> }
 
-export interface ParseCtx { stageId: StageId; workerId: string; refs: Set<string>; text: Map<string, string>; now: string; generation: number; existing: WorkerFeedback[]; limits: FeedbackLimits; known: Set<string> }
+export interface ParseCtx { /** When true, attribute the section instead of using stageId. stageId is ignored for ordinary missions. */ deriveStage?: boolean; /** Explicit mission target stage, not a title. */ targetStage?: string | null; source?: { taskId: string; missionType: string }; stageId: StageId; workerId: string; refs: Set<string>; text: Map<string, string>; now: string; generation: number; existing: WorkerFeedback[]; limits: FeedbackLimits; known: Set<string> }
 
 /** Validates raw model feedback. Never throws; malformed items are reported in `rejected`. Evidence references that do not resolve to approved sources are dropped, and a fact without a verifiable quote is downgraded. */
 export function parseWorkerFeedback(raw: unknown, c: ParseCtx): FeedbackParse {
   const out: FeedbackParse = { accepted: [], deferred: [], rejected: [] };
   if (!Array.isArray(raw)) return out;
   let seq = c.existing.length;
-  let sawCompletion = c.existing.some((f) => f.stageId === c.stageId && f.type === "completion_assessment" && f.stageGeneration === c.generation);
+  let sawCompletion = c.existing.some((f) => f.type === "completion_assessment" && (c.source ? f.sourceTaskId === c.source.taskId : f.stageId === c.stageId && f.stageGeneration === c.generation));
   for (const r of raw.slice(0, c.limits.perStage + 4)) {
     const o = (r && typeof r === "object" ? r : {}) as Record<string, unknown>;
     const title = clip(o.title, 140), type = String(o.type);
@@ -93,23 +150,25 @@ export function parseWorkerFeedback(raw: unknown, c: ParseCtx): FeedbackParse {
     const pa = (o.proposedAction && typeof o.proposedAction === "object" ? o.proposedAction : {}) as Record<string, unknown>;
     const kind = ACTIONS.has(String(pa.kind)) ? String(pa.kind) as WorkerFeedback["proposedAction"]["kind"] : "none";
     const spec = String(o.recommendedSpecialist ?? "").toLowerCase();
-    const fp = `${type}|${c.stageId}|${norm(title)}`;
+    const stageId = c.deriveStage ? attributeOrdinaryStage(c, affected, o.targetStage) : c.stageId;
+    if (stageId === "unassigned") notes.push("Not attributed to a section. No valid affectedStages, no mission target stage, and the mission purpose did not map to one section. It was not filed under plan.");
+    const fp = `${type}|${stageId}|${norm(title)}`;
     const peers = [...c.existing, ...out.accepted, ...out.deferred].filter((f) => f.status !== "superseded");
-    if (peers.some((f) => `${f.type}|${f.stageId}|${norm(f.title)}` === fp || (f.type === type && f.stageId === c.stageId && similar(f.observation, observation)))) { reject("duplicate of earlier feedback"); continue; }
+    if (peers.some((f) => `${f.type}|${f.stageId}|${norm(f.title)}` === fp || (f.type === type && f.stageId === stageId && similar(f.observation, observation)))) { reject("duplicate of earlier feedback"); continue; }
     seq++;
     const fb: WorkerFeedback = {
-      id: `F${seq}`, workerId: c.workerId, stageId: c.stageId, type: type as FeedbackType, title, observation, reasoning, businessImpact: impact,
+      id: `F${seq}`, workerId: c.workerId, stageId, ...(c.source ? { sourceTaskId: c.source.taskId, sourceMissionType: c.source.missionType } : {}), type: type as FeedbackType, title, observation, reasoning, businessImpact: impact,
       affectedStages: affected, evidenceRefs: refs, basis, ...(basis === "observed" && quote ? { quote } : {}),
       confidence: ["high", "medium", "low"].includes(String(o.confidence)) ? o.confidence as WorkerFeedback["confidence"] : "low",
       proposedAction: { kind, detail: clip(pa.detail, 300) }, researchQuestions: questions,
       ...(SPECIALISTS.has(spec) ? { recommendedSpecialist: spec as WorkerFeedback["recommendedSpecialist"] } : {}),
-      createdAt: c.now, status: "open", stageGeneration: c.generation, evaluations: 0, ...(notes.length ? { notes } : {}),
+      createdAt: c.now, status: "open", ...(stageId === "unassigned" ? {} : { stageGeneration: c.generation }), evaluations: 0, ...(notes.length ? { notes } : {}),
       ...(type === "completion_assessment" ? { complete: o.complete === true, unresolved: (Array.isArray(o.unresolved) ? o.unresolved : []).map((u) => clip(u, 200)).filter(Boolean).slice(0, 6) } : {}),
     };
     // A worker saying "complete" with nothing unresolved is information for the record, not work for the planner.
     if (type === "completion_assessment" && fb.complete && !fb.unresolved?.length) { fb.status = "accepted"; fb.resolution = "Worker reports its assignment complete with nothing unresolved."; out.accepted.push(fb); continue; }
     const used = c.existing.length + out.accepted.length + out.deferred.length;
-    const stageUsed = [...c.existing, ...out.accepted, ...out.deferred].filter((f) => f.stageId === c.stageId && f.stageGeneration === c.generation).length;
+    const stageUsed = [...c.existing, ...out.accepted, ...out.deferred].filter((f) => (c.source ? f.sourceTaskId === c.source.taskId : f.stageId === stageId && f.stageGeneration === c.generation)).length;
     if (used >= c.limits.perDossier || stageUsed >= c.limits.perStage) { fb.status = "deferred"; fb.resolution = "Feedback limit reached: recorded for the operator, not evaluated by the planner."; out.deferred.push(fb); continue; }
     out.accepted.push(fb);
   }
@@ -135,40 +194,77 @@ export const FEEDBACK_PLANNER_RULES = [
 /** Planner-approved worker findings, for later stages. Labelled as colleague notes, never as evidence. */
 export function acceptedFeedbackBlock(d: Dossier, upTo: StageId, order: StageId[]): string {
   const idx = order.indexOf(upTo);
-  const list = (d.feedback ?? []).filter((f) => (f.status === "accepted" || f.status === "actioned") && f.type !== "completion_assessment" && f.stageId !== upTo && order.indexOf(f.stageId) < idx).slice(-6);
+  const list = (d.feedback ?? []).filter((f) => {
+    if ((f.status !== "accepted" && f.status !== "actioned") || f.type === "completion_assessment") return false;
+    if (f.stageId === "unassigned") return true;
+    return f.stageId !== upTo && order.indexOf(f.stageId) < idx;
+  }).slice(-6);
   if (!list.length) return "";
   return `\n\n--- FINDINGS FROM COLLEAGUES THAT THE PLANNER ACCEPTED (internal notes, not evidence; basis shown) ---\n${list.map((f) => `[${f.id}] ${f.type} (${f.basis}${f.evidenceRefs.length ? `, ${f.evidenceRefs.join(",")}` : ""}): ${clip(f.title, 120)} — ${clip(f.observation, 300)} Planner: ${clip(f.resolution, 160)}`).join("\n")}`;
 }
 
 const HIGH = (f: WorkerFeedback) => f.confidence !== "low" && (f.type === "challenge" || f.type === "finding" || f.type === "alternative_direction" || f.type === "dependency_warning" || f.type === "needs_evidence");
+/** Keyword hit is enough to call a conflict high-impact. A miss is uncertainty, not a reason to treat it as non-material. */
+const MATERIAL_CONFLICT = /\b(phone|email|address|location|owner|ownership|identity|name|closed|closure|operating|trading|founded|price|pricing|licen[cs]e|regulat|legal|same business|different business|distinct|tax|taxation|fraud|litigation|lawsuit|suing|sued|insolvency|insolvent|bankruptcy|bankrupt|sanction|sanctions|embargo|banned|ban|prohibited|cease|indictment|conviction|criminal|fine|penalty|receivership|winding[- ]up|money laundering|embezzl|defaulted|seizure|court order|regulatory)\b/i;
 
-/** Deterministic completion facts. Code decides what is unresolved; a planner may add words or open new questions, never hide an item. */
-export function assessCompletion(d: Dossier, stages: Array<{ id: StageId; title: string }>, now: string): CompletionAssessment {
+function basisCounts(v: unknown): { backed: number; total: number } {
+  let backed = 0, total = 0;
+  const walk = (o: unknown) => {
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o)) { o.forEach(walk); return; }
+    const r = o as Record<string, unknown>;
+    if (typeof r.basis === "string") { total++; if (r.basis === "verified" || r.basis === "inference") backed++; }
+    Object.values(r).forEach(walk);
+  };
+  walk(v);
+  return { backed, total };
+}
+
+/**
+ * Deterministic completion facts. Code lists what is unresolved and whether each item is MATERIAL (blocks completion) or DISCLOSED
+ * (carried as a stated limitation). A planner may add words, acknowledge a material source conflict, or open new questions, never hide an item.
+ */
+export function assessCompletion(d: Dossier, stages: Array<{ id: StageId; title: string }>, now: string, opts: { plannerJudgedComplete?: boolean } = {}): CompletionAssessment {
   const reasons: string[] = []; const unresolved: CompletionAssessment["unresolved"] = [];
-  let pending = false; let blocked = false;
+  let stagePending = false, blocked = false, investigating = false;
   for (const s of stages) {
     const st = d.stages[s.id];
-    if (st.status === "blocked") { blocked = true; unresolved.push({ kind: "stage", ref: s.id, detail: `${s.title} is blocked${st.error ? `: ${clip(st.error, 140)}` : ""}` }); }
-    else if (st.status !== "completed") { pending = true; unresolved.push({ kind: "stage", ref: s.id, detail: `${s.title} is ${st.status}` }); }
-    else if (st.staleBecause || d.revisions?.[s.id]?.pending) { pending = true; unresolved.push({ kind: "stale", ref: s.id, detail: `${s.title} was invalidated by newer information and has not been re-run` }); }
+    if (st.status === "blocked") { blocked = true; unresolved.push({ kind: "stage", ref: s.id, detail: `${s.title} is blocked${st.error ? `: ${clip(st.error, 140)}` : ""}`, material: true }); }
+    else if (st.status !== "completed") { stagePending = true; unresolved.push({ kind: "stage", ref: s.id, detail: `${s.title} is ${st.status}`, material: true }); }
+    else if (st.staleBecause || d.revisions?.[s.id]?.pending) { stagePending = true; unresolved.push({ kind: "stale", ref: s.id, detail: `${s.title} was invalidated by newer information and has not been re-run`, material: true }); }
+    else if (["swot", "insights", "growth", "pr"].includes(s.id)) {
+      const c = basisCounts(st.output);
+      if (c.total >= 4 && c.backed === 0) unresolved.push({ kind: "unsupported", ref: s.id, detail: `${s.title} rests entirely on hypotheses and unknowns: no item cites an approved source`, material: false });
+    }
   }
   for (const f of d.feedback ?? []) {
-    if (f.status === "open" || f.status === "investigating" || f.status === "awaiting_reevaluation") { pending = true; unresolved.push({ kind: "feedback", ref: f.id, detail: `${f.type} awaiting the planner: ${clip(f.title, 100)}` }); }
-    else if (f.status === "deferred" && (HIGH(f) || f.type === "completion_assessment")) unresolved.push({ kind: "feedback", ref: f.id, detail: `${f.type} not resolved (${clip(f.resolution, 120)}): ${clip(f.title, 100)}` });
+    if (f.status === "investigating" || f.status === "awaiting_reevaluation") { investigating = true; unresolved.push({ kind: "investigation", ref: f.id, detail: `research for ${f.type} ${f.id} has not been reconsidered by the planner: ${clip(f.title, 100)}`, material: true }); }
+    else if (f.status === "open") { stagePending = true; unresolved.push({ kind: "feedback", ref: f.id, detail: `${f.type} awaiting the planner: ${clip(f.title, 100)}`, material: true }); }
+    else if (f.status === "deferred") { const material = HIGH(f) || f.type === "completion_assessment"; unresolved.push({ kind: "feedback", ref: f.id, detail: `${f.type} not resolved (${clip(f.resolution, 120)}): ${clip(f.title, 100)}`, material }); }
   }
-  for (const h of d.handoffs ?? []) if (h.status === "open" && h.from !== "chat") { pending = true; unresolved.push({ kind: "handoff", ref: h.id, detail: `handoff still open: ${clip(h.detail, 100)}` }); }
+  for (const h of d.handoffs ?? []) if (h.status === "open" && h.from !== "chat") {
+    if (h.from === "planner") { stagePending = true; unresolved.push({ kind: "specialist", ref: h.id, detail: `specialist assignment still open: ${clip(h.detail, 100)}`, material: true }); }
+    else { investigating = true; unresolved.push({ kind: "handoff", ref: h.id, detail: `handoff still open: ${clip(h.detail, 100)}`, material: true }); }
+  }
+  for (const c of d.planLog ?? []) for (const t of c.tasks) if (t.status === "failed" && !(d.feedback ?? []).some((f) => t.feedbackIds?.includes(f.id) && f.status === "deferred")) unresolved.push({ kind: "specialist", ref: t.id, detail: `specialist task "${clip(t.title, 80)}" (${t.assignedAI}) failed: ${clip(t.error, 100)}`, material: false });
+  const conflicts = d.inspection?.conflicts ?? [];
+  for (const c of conflicts) {
+    const named = MATERIAL_CONFLICT.test(c);
+    unresolved.push({ kind: "contradiction", ref: "inspection", detail: named ? `approved sources conflict (high-impact): ${clip(c, 140)}` : `approved sources conflict (wording did not match a high-impact keyword; held for review): ${clip(c, 140)}`, material: !opts.plannerJudgedComplete });
+  }
   const approved = d.sources.filter((u) => u.decision === "approved" && u.role !== "competitor").length;
   const feedback = d.feedback ?? [];
-  const tally = (s: string) => feedback.filter((f) => f.status === s).length;
-  const needsOperator = unresolved.filter((u) => u.kind === "feedback");
-  const conflicts = d.inspection?.conflicts?.length ?? 0;
+  const tally = (st: string) => feedback.filter((f) => f.status === st).length;
+  const material = unresolved.filter((u) => u.material), disclosed = unresolved.filter((u) => !u.material);
   let state: CompletionAssessment["state"];
-  if (pending) { state = "in_progress"; reasons.push("Work is still moving: a section, revision, handoff or feedback item has not settled."); }
+  if (stagePending) { state = "in_progress"; reasons.push("Work is still moving: a section, revision, specialist assignment or feedback item has not settled."); }
   else if (blocked) { state = "blocked"; reasons.push("At least one section is blocked and cannot continue without the operator."); }
-  else if (needsOperator.length) { state = "awaiting_decision"; reasons.push(`${needsOperator.length} item(s) the planner could not settle remain and need an operator decision.`); }
-  else { state = "complete"; reasons.push(`All ${stages.length} sections completed on current upstream output, nothing is invalidated, and no high-impact challenge, research question, handoff or contradiction is unresolved.`); }
+  else if (investigating) { state = "awaiting_investigation"; reasons.push("Research the planner ordered has not come back to it yet."); }
+  else if (material.length) { state = "awaiting_decision"; reasons.push(`${material.length} material item(s) remain for the planner or the operator. An unresolved source conflict stays material until it is reviewed, including when its wording does not match a keyword list.`); }
+  else if (disclosed.length) { state = "complete_with_limitations"; reasons.push(`All ${stages.length} sections completed on current output. ${disclosed.length} limitation(s) are judged non-material and are disclosed rather than blocking.`); }
+  else { state = "complete"; reasons.push(`All ${stages.length} sections completed on current upstream output, nothing is invalidated, and nothing is unresolved.`); }
   reasons.push(`${approved} approved source(s) back the dossier. Worker feedback: ${feedback.length} recorded (${tally("accepted")} accepted, ${tally("actioned")} actioned, ${tally("rejected")} rejected, ${tally("deferred")} deferred).`);
-  if (conflicts) reasons.push(`${conflicts} source conflict(s) from inspection are carried as stated limitations; an open challenge about them would block completion.`);
+  if (conflicts.length && opts.plannerJudgedComplete) reasons.push("The planner reviewed the source conflicts and judged the work sufficient; they remain disclosed.");
   return { at: now, state, reasons, unresolved: unresolved.slice(0, 30), assessedBy: "code" };
 }
 

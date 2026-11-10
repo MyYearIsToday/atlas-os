@@ -423,7 +423,7 @@ export function createAiProxyServer(
           if (!decision) { status = 400; payload = { ok: false, error: "invalid_decision", message: "decision must be accept, dismiss or reevaluate" }; }
           else {
             const r = await dossierEngine.resolveFeedback(parts[4], parts[6], decision, typeof body?.note === "string" ? body.note : undefined);
-            if (r.ok) { dossierEngine.kick(parts[4]); await atlasPipeline.persistence?.flush(); payload = { ok: true }; }
+            if (r.ok) { dossierEngine.kick(parts[4]); await atlasPipeline.persistence?.flush(); payload = { ok: true, evaluated: r.evaluated ?? false, status: r.status ?? null }; }
             else { status = r.reason === "no dossier" || r.reason === "no such feedback" ? 404 : 409; payload = { ok: false, error: "cannot_resolve_feedback", message: r.reason }; }
           }
         } else if (method === "GET" && url === "/api/scout/candidates") {
@@ -709,6 +709,8 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
         implementationTypes: (task) => inferMissionType(task) === MISSION_TYPE,
         implementationHandler: async (task) => { const b = task.clientId ? pipelineDeps!.store.businesses.get(task.clientId) : undefined; const d = b ? dossierEngine?.get(b.id) : undefined; if (!b || !d) return { outcome: "BLOCKED" as const, reason: "no dossier exists for this business yet; start work on it first" }; return protoSvc.startForTask(b, d, task); }, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled,
         afterRun: () => persistence?.flush() ?? Promise.resolve(),
+        // Optional worker feedback in ordinary mission output goes to the same dossier feedback and planner coordination as stage feedback.
+        onOutput: (task, text) => dossierEngine ? dossierEngine.ingestMissionFeedback(task, text).then(() => undefined) : Promise.resolve(),
         blockedBy: (task) => { const d = task.clientId ? pipelineDeps!.store.dossiers.get(task.clientId) : undefined; return d && d.status === "awaiting_sources" && !String(task.missionType ?? "").startsWith("dossier_") ? "Blocked: approve this business's research sources first" : null; } });
       pipelineDeps.onMissionCreated = (task) => runner.autoExecute(task);
       // Autonomy layer (Objectives 4-10): lifecycles, approvals, loop, observability. The loop itself starts only when ATLAS_AUTONOMY_ENABLED=true.

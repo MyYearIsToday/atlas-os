@@ -45,7 +45,9 @@ export function DossierHistoryPage() {
     try {
       const r = await fetch(`/api/atlas/dossiers/${encodeURIComponent(dossier.businessId)}/feedback/${encodeURIComponent(feedbackId)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision }) });
       if (!r.ok) { const body = await r.json().catch(() => ({})) as { message?: string }; setError(body.message ?? 'That decision could not be recorded.'); return; }
+      const body = await r.json().catch(() => ({})) as { evaluated?: boolean };
       await load(dossier.businessId);
+      if (decision === 'reevaluate' && body.evaluated === false) setError('The planner could not evaluate it just now. The item stays open and can be asked again.');
     } catch { setError('The dossier service is not reachable from this page.'); }
   }
   const openFeedback = (dossier?.feedback ?? []).filter((f) => ['deferred', 'open', 'awaiting_reevaluation', 'investigating'].includes(f.status));
@@ -90,7 +92,7 @@ export function DossierHistoryPage() {
               {!dossier.completion && <p className="mt-2 text-[12px] text-[#89a]">Not assessed yet. It is judged when every section has run.</p>}
               {dossier.completion && (
                 <div className="mt-2 text-[12px] text-[#d5deea]">
-                  <p><span className="text-[#d4af37]">{dossier.completion.state.replace('_', ' ')}</span> <span className="text-[#89a]">· {dossier.completion.assessedBy} · {dossier.completion.at.slice(0, 16).replace('T', ' ')}</span></p>
+                  <p><span className="text-[#d4af37]">{dossier.completion.state.replace(/_/g, ' ')}</span> <span className="text-[#89a]">· {dossier.completion.assessedBy} · {dossier.completion.at.slice(0, 16).replace('T', ' ')}</span></p>
                   {dossier.completion.plannerNote && <p className="mt-1">Planner: {dossier.completion.plannerNote}</p>}
                   <ul className="mt-2 list-disc space-y-1 pl-4 text-[#c5d0dc]">{dossier.completion.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
                   {dossier.completion.unresolved.length > 0 && <ul className="mt-2 space-y-1 text-[#e0b66a]">{dossier.completion.unresolved.map((u, i) => <li key={i}>{u.kind} {u.ref}: {u.detail}</li>)}</ul>}

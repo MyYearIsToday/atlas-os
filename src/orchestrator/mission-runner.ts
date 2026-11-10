@@ -49,6 +49,8 @@ export interface MissionRunnerOptions {
   blockedBy?: (task: Task) => string | null;
   /** Called after a run settles (success or failure), including runs that outlive the HTTP request. */
   afterRun?: () => Promise<void>;
+  /** Called with the finished output of a completed mission. Failures are swallowed: the mission has already completed. */
+  onOutput?: (task: Task, text: string) => Promise<void>;
   /**
    * Implementation missions (website prototypes) are not text answers. When present, such a mission is handed to this handler,
    * which stores real files and sets the mission status itself. Without it the mission is blocked, never "completed" by prose.
@@ -182,6 +184,7 @@ export class MissionRunner {
       // Model output is a work product, never evidence: it is stored apart and flagged accordingly.
       const routing = describeRouting(providerResult, result.task.missionType ? MISSION_TASK_TYPE[result.task.missionType] ?? null : null);
       store.missionOutputs.set(taskId, { generatedBy: routing.label, text: providerResult.text, isEvidence: false, routing: routing.record });
+      try { await this.options.onOutput?.(result.task, providerResult.text); } catch (e) { console.error(`[atlas-mission] output hook failed for ${taskId}; mission stays completed: ${e instanceof Error ? e.message.slice(0, 200) : "unknown"}`); }
     }
     const transactions = ledger.list().filter((t) => t.evidenceRefs.includes(`lineage:${result.lineageId}`));
     const day = (this.options.now?.() ?? new Date()).toISOString().slice(0, 10);
