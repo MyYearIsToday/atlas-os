@@ -1004,7 +1004,7 @@ export class DossierEngine {
         task = await queue.create({
           title: `${s.title} — ${b.canonicalName}${n > 0 ? ` (recovery ${n})` : ""}`,
           description: `${PREAMBLE}\n\nTASK: ${s.title}.\n${SPEC[s.id as Exclude<StageId, "research" | "competitor_discovery">]}\n${FEEDBACK_CLAUSE}${correction}\n\n${contextBlock(b, x, this.d.store, s.id)}`,
-          assignedAI: s.assignedAI!, clientId: b.id, priority: "Medium", approvalRequired: "Auto", missionType: s.missionType!, dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
+          assignedAI: s.assignedAI!, clientId: b.id, priority: "Medium", approvalRequired: "Auto", missionType: s.missionType!, targetStage: s.id, dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
         });
         st.taskId = task.taskId; st.inputs = this.inputsFor(x, s); this.save(x);
       }
@@ -1138,7 +1138,7 @@ export class DossierEngine {
     const x = this.get(businessId); const b = this.d.store.businesses.get(businessId);
     if (!x || !b) return { status: 404, body: { ok: false, error: "no_dossier" } };
     const res = await executeAction(x, b, body, { now: () => this.now(), createMission: async (m) => {
-      const t = await this.d.missionQueue.create({ title: m.title, description: m.description, assignedAI: m.assignedAI, clientId: m.clientId, priority: "Medium", approvalRequired: "Approval Required", missionType: "dossier_followup", dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified" });
+      const t = await this.d.missionQueue.create({ title: m.title, description: m.description, assignedAI: m.assignedAI, clientId: m.clientId, priority: "Medium", approvalRequired: "Approval Required", missionType: "dossier_followup", targetStage: "campaign", dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified" });
       return { taskId: t.taskId };
     } });
     if (res.status === 200) { this.save(x); await this.d.flush?.(); }
@@ -1340,11 +1340,12 @@ export class DossierEngine {
       return { ...base, status: "skipped", error: earlier.length || queued ? "duplicate of an earlier planner task" : "specialist task limit reached" };
     }
     const handoff = this.openHandoff(x, { from: "planner", fromEmployee: t.assignedAI, kind: "needs_evidence", detail: `${t.title}. ${t.description}`, sourceRefs: [], feedbackId });
+    const feedbackStage = feedbackId ? (x.feedback ?? []).find((f) => f.id === feedbackId)?.stageId : undefined;
     try {
       const task = await this.d.missionQueue.create({
         title: `Planner task: ${t.title} — ${b.canonicalName}`,
         description: `${PREAMBLE}\n\nTASK (added by the planner): ${t.title}\n${t.description}\nWhy it was added: ${why}\nHandoff: ${handoff?.id ?? "none"}. This is internal analysis for ${t.assignedAI}. Do not contact anyone, publish, or spend.\n\n${FEEDBACK_CLAUSE_PROSE}\n\nWrite a substantive internal work product in prose (short headed sections or bullets), not JSON. Keep what is observed (cite source ids like S1), what you infer and what is unknown clearly apart.\n\n${contextBlock(b, x, this.d.store, "plan")}`,
-        assignedAI: t.assignedAI as Task["assignedAI"], clientId: b.id, priority: "Medium", approvalRequired: "Auto", missionType: "dossier_replan_task", dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
+        assignedAI: t.assignedAI as Task["assignedAI"], clientId: b.id, priority: "Medium", approvalRequired: "Auto", missionType: "dossier_replan_task", ...(feedbackStage && feedbackStage !== "unassigned" ? { targetStage: feedbackStage } : {}), dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
       });
       const r = await this.d.runner.run(task.taskId, {}, { autonomous: true });
       if (r.outcome !== "COMPLETED") { this.closeHandoff(x, handoff?.id, "considered", clip(`${r.outcome}${r.reason ? `: ${r.reason}` : ""}`, 200)); return { ...base, taskId: task.taskId, status: "failed", error: clip(`${r.outcome}${r.reason ? `: ${r.reason}` : ""}`, 160) }; }
@@ -1526,7 +1527,7 @@ export class DossierEngine {
    * guessed from the text, and evidence references that do not resolve to that dossier's approved sources are dropped by the same validator
    * as stage feedback. Recorded feedback goes to the same planner coordination, also after the pipeline has finished.
    */
-  async ingestMissionFeedback(task: { taskId: string; clientId?: string | null; missionType?: string | null; assignedAI?: string | null; targetStage?: string | null }, text: string): Promise<{ recorded: number }> {
+  async ingestMissionFeedback(task: Pick<Task, "taskId" | "clientId" | "missionType" | "assignedAI" | "targetStage">, text: string): Promise<{ recorded: number }> {
     const none = { recorded: 0 };
     try {
       if (!task.clientId || !task.missionType || STAGES.some((s) => s.missionType === task.missionType)) return none;
@@ -1622,7 +1623,7 @@ export class DossierEngine {
       const task = await this.d.missionQueue.create({
         title: `Follow-up: ${f.title} — ${b.canonicalName}`,
         description: `${f.external ? "EXTERNAL ACTION: prepare a DRAFT only; nothing may be sent, published or spent without the operator's explicit approval.\n" : "Internal follow-up from the Atlas dossier.\n"}${f.description}\n\n(Source: dossier for business ${b.id}. Treat the dossier's hypotheses as unverified.)`,
-        assignedAI: f.assignedAI as Task["assignedAI"], clientId: b.id, priority: "Medium", approvalRequired: "Approval Required", missionType: "dossier_followup", dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
+        assignedAI: f.assignedAI as Task["assignedAI"], clientId: b.id, priority: "Medium", approvalRequired: "Approval Required", missionType: "dossier_followup", targetStage: "plan", dueDate: this.now().slice(0, 10), estimatedCost: 0, estimatedTime: "unspecified",
       });
       x.followUps.push({ key, taskId: task.taskId, title: f.title, assignedAI: f.assignedAI, external: f.external } satisfies FollowUpRef);
     }

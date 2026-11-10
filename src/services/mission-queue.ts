@@ -53,6 +53,8 @@ export interface Task {
   lastFailureCode: string | null;
   /** Explicit mission kind (e.g. internal_audit_summary). Absent means unclassified, which is never auto-executable. */
   missionType?: string;
+  /** Explicit dossier section this mission addresses; persisted as metadata, never inferred from its title. */
+  targetStage?: string | null;
 }
 
 export type TaskInput = Omit<Task, 'taskId' | 'createdAt' | 'completedAt' | 'status' | 'executionHistory' | 'retryCount' | 'lineageId' | 'lastFailureReason' | 'lastFailureCode'> & {
