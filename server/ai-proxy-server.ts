@@ -38,6 +38,7 @@ import { PrototypeService, inferMissionType, MISSION_TYPE } from "./atlas/protot
 import { parseResearchRequest } from "./atlas/research-request";
 import { ProcessController, buildCandidateView, readDossier, readMissionResult, startCandidate, type ActionContext } from "./atlas/scout-actions";
 import { DossierEngine, missionContext } from "./atlas/dossier";
+import { limitsFromEnv } from "./atlas/worker-feedback";
 import { ChatService, parseProposalRequest, type ChatModel } from "./atlas/chat";
 import { handleWorkspaceRequest } from "./workspace/workspace-store";
 import { handleSmcsRequest } from "./atlas/smcs-library";
@@ -422,6 +423,22 @@ export function createAiProxyServer(
             if (!pr.ok) { status = 400; payload = { ok: false, error: "invalid_decision", message: pr.message }; }
             else ({ status, body: payload } = await chatService.decideProposal(chatMatch[1], pr.messageId, pr.proposalId, pr.decision));
           } else { status = 405; payload = { error: { code: "method_not_allowed", message: "unsupported method" } }; }
+        } else if (method === "POST" && /^\/api\/atlas\/dossiers\/[A-Za-z0-9_-]{1,80}\/reresearch$/.test(url)) {
+          const id = url.split("/")[4];
+          const body = (await readJsonBody(req)) as { reason?: unknown } | null;
+          const r = await dossierEngine.reresearch(id, typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim() : "operator requested a fresh pass");
+          if (r.ok) { dossierEngine.kick(id); await atlasPipeline.persistence?.flush(); payload = { ok: true, note: "Research is running again. The earlier version is kept in the dossier history." }; }
+          else { status = r.reason === "no dossier" ? 404 : 409; payload = { ok: false, error: "cannot_reresearch", message: r.reason }; }
+        } else if (method === "POST" && /^\/api\/atlas\/dossiers\/[A-Za-z0-9_-]{1,80}\/feedback\/F\d{1,4}$/.test(url)) {
+          const parts = url.split("/");
+          const body = (await readJsonBody(req)) as { decision?: unknown; note?: unknown } | null;
+          const decision = body?.decision === "accept" || body?.decision === "dismiss" || body?.decision === "reevaluate" ? body.decision : null;
+          if (!decision) { status = 400; payload = { ok: false, error: "invalid_decision", message: "decision must be accept, dismiss or reevaluate" }; }
+          else {
+            const r = await dossierEngine.resolveFeedback(parts[4], parts[6], decision, typeof body?.note === "string" ? body.note : undefined);
+            if (r.ok) { dossierEngine.kick(parts[4]); await atlasPipeline.persistence?.flush(); payload = { ok: true, evaluated: r.evaluated ?? false, status: r.status ?? null }; }
+            else { status = r.reason === "no dossier" || r.reason === "no such feedback" ? 404 : 409; payload = { ok: false, error: "cannot_resolve_feedback", message: r.reason }; }
+          }
         } else if (method === "GET" && url === "/api/scout/candidates") {
           payload = { durable: !!atlasPipeline.persistence, discovery: scoutDiscoveryStatus, items: buildCandidateView({ discovered: scoutPipeline.repository.list(), pipeline: { deps: atlasPipeline.deps, autonomy: atlasPipeline.autonomy } }) };
         } else if (method === "POST" && url === "/api/scout/candidates/start") {
@@ -705,6 +722,8 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
         implementationTypes: (task) => inferMissionType(task) === MISSION_TYPE,
         implementationHandler: async (task) => { const b = task.clientId ? pipelineDeps!.store.businesses.get(task.clientId) : undefined; const d = b ? dossierEngine?.get(b.id) : undefined; if (!b || !d) return { outcome: "BLOCKED" as const, reason: "no dossier exists for this business yet; start work on it first" }; return protoSvc.startForTask(b, d, task); }, missionQueue: pipelineDeps.missionQueue, ledger, dispatcher: orchestrator, store: pipelineDeps.store, executionEnabled,
         afterRun: () => persistence?.flush() ?? Promise.resolve(),
+        // Optional worker feedback in ordinary mission output goes to the same dossier feedback and planner coordination as stage feedback.
+        onOutput: (task, text) => dossierEngine ? dossierEngine.ingestMissionFeedback(task, text).then(() => undefined) : Promise.resolve(),
         blockedBy: (task) => { const d = task.clientId ? pipelineDeps!.store.dossiers.get(task.clientId) : undefined; return d && d.status === "awaiting_sources" && !String(task.missionType ?? "").startsWith("dossier_") ? "Blocked: approve this business's research sources first" : null; } });
       pipelineDeps.onMissionCreated = (task) => runner.autoExecute(task);
       // Autonomy layer (Objectives 4-10): lifecycles, approvals, loop, observability. The loop itself starts only when ATLAS_AUTONOMY_ENABLED=true.
@@ -723,12 +742,18 @@ async function startScoutScheduler(persistence: AtlasPersistence | null, applied
       const execute = createInternalExecutor({ pipeline: pipelineDeps.store, collectors: pipelineDeps.collectors ?? [], missionQueue: pipelineDeps.missionQueue, lifecycle, dispatcher: orchestrator, prospects, delivery, revenue });
       const cycleDeps = { policy: defaultAutonomyPolicy, lifecycle, pipeline: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, ledger, execute, metricInputs, persistenceHealthy: () => persistence?.health().ok ?? true };
       const searchProvider = new TavilyWebDiscoveryProvider();
-      dossierEngine = new DossierEngine({ store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 6 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })),
+      dossierEngine = new DossierEngine({ limits: limitsFromEnv(process.env), store: pipelineDeps.store, missionQueue: pipelineDeps.missionQueue, runner, flush: () => persistence?.flush() ?? Promise.resolve(), search: async (query) => (await searchProvider.discover({ query, maxResults: 6 })).map((r) => ({ title: r.title, url: r.sourceUrl, snippet: r.snippet })),
         fetchDoc: safeFetch,
         // Research-loop planner: the same free-routed Workforce as the dossier stages, only when mission execution is enabled. Without it the loop uses its deterministic planner.
         plan: executionEnabled && providers?.workforce ? async (prompt) => {
           try {
             const r = await providers!.workforce.execute({ workerRole: "researcher", taskType: "deep_research", task: "Choose the next research steps for one business. Reply with JSON only.", priority: 2, confidenceTarget: 0.5, budgetLimitUsd: 0.05, maxTokens: 900, temperature: 0.2, timeoutMs: 45_000, lineageId: "atlas-research-plan", messages: [{ role: "user", content: prompt }] });
+            return r.failed ? null : r.text;
+          } catch { return null; }
+        } : undefined,
+        reason: executionEnabled && providers?.workforce ? async (prompt) => {
+          try {
+            const r = await providers!.workforce.execute({ workerRole: "analyst", taskType: "strategy", task: "Plan or direct one business investigation. Reply with JSON only.", priority: 2, confidenceTarget: 0.5, budgetLimitUsd: 0.05, maxTokens: 900, temperature: 0.2, timeoutMs: 45_000, lineageId: "atlas-planner", messages: [{ role: "user", content: prompt }] });
             return r.failed ? null : r.text;
           } catch { return null; }
         } : undefined,

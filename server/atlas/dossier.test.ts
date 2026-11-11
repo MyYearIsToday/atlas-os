@@ -3,15 +3,17 @@ import assert from "node:assert/strict";
 import { isOwnSiteHost, DossierEngine, parseStageOutput, STAGES } from "./dossier";
 import { createPipelineDeps } from "../../src/orchestrator/atlas-pipeline";
 
-const biz = (id = "b1") => ({ id, canonicalName: "Mesa UGBS", category: "education", address: "University of Ghana, Legon", sourceReferences: ["manual"] }) as never;
-const GOOD: Record<string, unknown> = {
+export const biz = (id = "b1") => ({ id, canonicalName: "Mesa UGBS", category: "education", address: "University of Ghana, Legon", sourceReferences: ["manual"] }) as never;
+export const GOOD: Record<string, unknown> = {
   dossier_profile: { name: "Mesa UGBS", industry: "student association", productsServices: ["events"], location: "Legon", targetAudience: "students", website: "unknown", socialAccounts: [{ platform: "LinkedIn", url: "https://linkedin.com/x", basis: "verified" }], brandNotes: "", facts: [{ claim: "Student body of UGBS", basis: "verified", sourceRefs: ["S1"], quote: "official student association of the University of Ghana Business School", confidence: "medium" }, { claim: "Has 5k followers", basis: "verified", sourceRefs: ["S99"], confidence: "high" }], unknowns: ["website"] },
   dossier_audit: { summary: "Thin web presence", strengths: [{ text: "Active LinkedIn", basis: "verified", sourceRefs: ["S1"], quote: "official student association of the University of Ghana Business School" }], weaknesses: [{ text: "No website", basis: "hypothesis", sourceRefs: [] }], gaps: [], improvementOpportunities: [] },
   dossier_competitors: { shortlist: [], whitespace: [], threats: [], gaps: ["none established"], conflicts: [], method: "m" },
   dossier_market: { audience: [{ text: "Students", basis: "hypothesis", sourceRefs: [] }], localContext: [], trends: [], opportunities: [{ title: "Event content", rationale: "r", basis: "hypothesis" }], threats: [], barriers: [], unknowns: ["demand data"], estimates: [{ description: "invented market size", method: "guess", uncertainty: "high", sourceRefs: [] }] },
   dossier_campaign: { objective: "o", pillars: [{ name: "Events", rationale: "r" }], channels: [{ channel: "Instagram", why: "w", constraints: "c" }], campaigns: [{ name: "Launch", objective: "o", audience: "a", message: "m", callToAction: "c", channels: ["Instagram"], kpis: [{ metric: "reach", measurement: "insights" }] }], sequence: [{ activity: "Draft", dependsOn: "approval" }], content: [{ campaign: "Launch", platform: "Instagram", format: "post", draft: "Hello Legon", creativeBrief: "b" }], assumptions: [] },
   dossier_swot: { strengths: [{ text: "Brand tied to UGBS", basis: "verified", sourceRefs: ["S1"], quote: "official student association of the University of Ghana Business School" }], weaknesses: [], opportunities: [{ text: "Event content", basis: "hypothesis", sourceRefs: [] }], threats: [{ text: "Other associations", basis: "unknown", sourceRefs: [] }] },
+  dossier_insights: { summary: "Mesa UGBS is a student association with a thin web presence in the approved sources.", findings: [{ title: "No own website", implication: "A later recommendation to launch a website is a hypothesis, because no site was found in the approved sources.", basis: "hypothesis", sourceRefs: [] }], unknowns: ["Membership size was not stated."] },
   dossier_growth: { recommendations: [{ title: "Launch a website", kind: "experiment", area: "visibility", currentSituation: "no website was found in the approved sources", rationale: "A hypothesis: without a website, students searching for the association cannot find its events or contacts.", priority: "high", effort: "medium", intendedOutcome: "more event enquiries from search", successMetric: "monthly enquiries from the site", nextSteps: ["Draft a one-page site outline for operator review"], basis: "hypothesis", sourceRefs: [] }] },
+  dossier_pr: { narrative: "A student-led association positioned within a university community.", positioning: "Student-led voice of the business school community.", newsworthy: [{ angle: "Annual programme announcement", whyNewsworthy: "Campus media regularly cover student association programmes.", timing: "before the semester", basis: "hypothesis", sourceRefs: [] }], stakeholders: [{ group: "Students", interest: "Events and career access", approach: "Direct campus channels" }], mediaOpportunities: [{ outletType: "Campus and student media", angle: "Student leadership story", rationale: "Closest audience to the association." }], pressReleaseConcepts: [], pitches: [], thoughtLeadership: [], reputationRisks: [], crisisReadiness: "Prepare a holding statement process.", unknowns: ["Existing media coverage was not found."] },
   dossier_plan: { dossierSummary: "Summary.", actionPlan: [{ title: "Build site", description: "d", owner: "Atlas", timeframe: "30 days" }], followUps: [{ title: "Draft outreach to the association", description: "draft", assignedAI: "closer", external: true }, { title: "Competitor scan", description: "scan", assignedAI: "finance", external: false }], limitations: ["No score"] },
 };
 
@@ -21,7 +23,7 @@ const seedOf = (dataUrl: string) => Buffer.from(dataUrl.split(",")[1], "base64")
 const VERDICT = (o: Record<string, unknown> = {}) => JSON.stringify({ association: "match", confidence: "high", relationship: "business_itself", reasoning: "The sign reads Mesa UGBS.", imageType: "logo", visibleText: ["Mesa UGBS"], supportingClues: [{ kind: "brand_text", detail: "name on the logo" }], conflictingClues: [], observations: [{ observation: "Blue and gold logo", category: "branding", confidence: "HIGH" }], ...o });
 const ok = (text: string) => ({ status: "OK" as const, text, provider: "workforce", model: "vision-test-model" });
 const PAGE = `<html><head><title>Mesa UGBS</title><meta property="og:image" content="/logo.png"></head><body><h1>Mesa UGBS</h1><p>Mesa UGBS is the official student association of the University of Ghana Business School in Legon, Accra.</p></body></html>`;
-function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; searchFn?: (q: string) => Promise<Array<{ title: string; url: string; snippet?: string }>>; imageFn?: (url: string) => { ok: boolean; bytes?: Uint8Array; contentType?: string; reason?: string } | null; fetchFn?: (url: string) => { ok: boolean; body?: string; reason?: string; finalUrl?: string } | null; onRun?: (taskId: string, type: string, n: number) => void; search?: never; maxConcurrent?: number; cooldown?: number; inspect?: (id: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[]; references?: Array<{ id: string; mimeType: string; dataUrl: string }> }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }> } = {}) {
+export function setup(opts: { script?: (type: string, call: number) => string | "FAIL"; searchFn?: (q: string) => Promise<Array<{ title: string; url: string; snippet?: string }>>; imageFn?: (url: string) => { ok: boolean; bytes?: Uint8Array; contentType?: string; reason?: string } | null; fetchFn?: (url: string) => { ok: boolean; body?: string; reason?: string; finalUrl?: string } | null; onRun?: (taskId: string, type: string, n: number) => void; search?: never; maxConcurrent?: number; cooldown?: number; reason?: (prompt: string) => Promise<string | null>; inspect?: (id: string, req: { prompt: string; mimeType: string; dataUrl: string; excludeModels?: string[]; references?: Array<{ id: string; mimeType: string; dataUrl: string }> }) => Promise<{ status: "OK"; text: string; provider: string; model: string } | { status: string; reason: string }> } = {}) {
   const deps = createPipelineDeps({});
   const calls: string[] = [];
   const counts = new Map<string, number>();
@@ -39,27 +41,27 @@ function setup(opts: { script?: (type: string, call: number) => string | "FAIL";
   const search = opts.searchFn ?? (async (q: string) => [{ title: "Mesa UGBS Legon", url: `https://example.com/mesa-ugbs/${encodeURIComponent(q).slice(-10)}`, snippet: "Mesa UGBS, University of Ghana Legon" }, { title: "Mesa Verde Winery", url: `https://wine.example/${encodeURIComponent(q).slice(-8)}`, snippet: "Napa valley wines" }]);
   const fetchDoc = async (url: string, o?: { binary?: boolean }) => { const ov = o?.binary ? opts.imageFn?.(url) : opts.fetchFn?.(url); if (ov) return ov; return defaultFetch(url, o); };
   const defaultFetch = async (url: string, o?: { binary?: boolean }) => (o?.binary ? { ok: true, contentType: "image/png", bytes: png(url) } : url.includes("wine.") ? { ok: true, body: "<html><title>Wine</title>Napa wines</html>", finalUrl: url } : { ok: true, body: PAGE, finalUrl: url });
-  const engine = new DossierEngine({ store: deps.store, missionQueue: deps.missionQueue, runner, search, fetchDoc, inspectImage: opts.inspect, maxConcurrent: opts.maxConcurrent, retryCooldownMs: opts.cooldown ?? 0 });
+  const engine = new DossierEngine({ store: deps.store, missionQueue: deps.missionQueue, runner, search, fetchDoc, inspectImage: opts.inspect, reason: opts.reason, maxConcurrent: opts.maxConcurrent, retryCooldownMs: opts.cooldown ?? 0 });
   return { deps, engine, calls };
 }
 const discover = async (ctx: ReturnType<typeof setup>, b = biz()) => { const id = (b as { id: string }).id; ctx.deps.store.businesses.set(id, b); ctx.deps.store.started.add(id); ctx.engine.ensure(b); ctx.engine.kick(id); await ctx.engine.idle(); return ctx.engine.get(id)!; };
 /** Confirming the business is the only human step: the engine runs every eligible stage on its own. */
-const start = discover;
+export const start = discover;
 
 test("full chain: research -> profile -> audit -> SWOT -> growth -> plan, structured, sourced, follow-ups need approval", async () => {
   const c = setup();
   const d = await start(c);
   assert.equal(d.status, "completed");
   assert.equal(d.sourceApproval?.mode, "auto", "no operator approval was needed");
-  assert.deepEqual(STAGES.map((s) => d.stages[s.id].status), Array(10).fill("completed"));
-  assert.deepEqual(c.calls, ["dossier_profile", "dossier_audit", "dossier_competitors", "dossier_market", "dossier_swot", "dossier_growth", "dossier_campaign", "dossier_plan"]);
+  assert.deepEqual(STAGES.map((s) => d.stages[s.id].status), Array(12).fill("completed"));
+  assert.deepEqual(c.calls, ["dossier_profile", "dossier_audit", "dossier_competitors", "dossier_market", "dossier_swot", "dossier_insights", "dossier_growth", "dossier_pr", "dossier_campaign", "dossier_plan"]);
   assert.ok(d.sources.length >= 1 && d.sources[0].id === "S1" && d.sources[0].confidence === "checked" && d.sources[0].retrievedAt);
   const facts = (d.stages.profile.output as { facts: Array<{ claim: string; basis: string }> }).facts;
   assert.equal(facts[0].basis, "verified");
   assert.equal(facts[1].basis, "hypothesis", "a 'verified' claim citing a non-existent source is downgraded");
   // each stage mission is internal, Auto, linked to the business, and carries the previous stage's output
   const stageTasks = c.deps.missionQueue.getSnapshot().filter((t) => t.missionType !== "dossier_followup");
-  assert.equal(stageTasks.length, 8);
+  assert.equal(stageTasks.length, 10);
   assert.ok(stageTasks.every((t) => t.clientId === "b1" && t.approvalRequired === "Auto"));
   assert.match(stageTasks.find((t) => t.missionType === "dossier_swot")!.description, /Thin web presence/);
   // follow-ups: never auto, external flagged as draft-only, finance coerced away
@@ -77,7 +79,7 @@ test("repeated start is idempotent: no second dossier, mission or follow-up", as
   c.engine.ensure(biz()); c.engine.kick("b1"); await c.engine.idle();
   await c.engine.tick(); 
   assert.equal(c.deps.missionQueue.getSnapshot().length, before);
-  assert.equal(c.calls.length, 8);
+  assert.equal(c.calls.length, 10);
 });
 
 test("provider failure is visible, never a hot loop, and gives up after bounded attempts", async () => {

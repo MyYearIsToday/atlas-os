@@ -66,7 +66,7 @@ export function summarizeDossier(d: Dossier | undefined, missions: Array<{ taskI
     status: d.status, updatedAt: d.updatedAt, manualRetries: d.manualRetries, sources: d.sources.length, sourceApproval: d.sourceApproval ?? null, sourcesApproved: d.sources.filter((s) => s.decision === "approved").length, sourcesPending: d.sources.filter((s) => (s.decision ?? "pending") === "pending").length, limitations: d.limitations,
     images: imageSummary(d),
     researchQuality: d.inspection?.quality ?? null,
-    stages: STAGES.map((s) => { const st = d.stages[s.id]; return { id: s.id, title: s.title, status: st.status, taskId: st.taskId, missionStatus: missions.find((m) => m.taskId === st.taskId)?.status ?? null, attempts: st.attempts, error: st.error, completedAt: st.completedAt, generatedBy: st.generatedBy, dependsOn: s.dependsOn, softDependsOn: s.softDependsOn ?? [], recovery: st.recovery ? { final: st.recovery.final, attempts: st.recovery.attempts } : null }; }),
+    stages: STAGES.map((s) => { const st = d.stages[s.id]; return { id: s.id, title: s.title, status: st.status, taskId: st.taskId, missionStatus: missions.find((m) => m.taskId === st.taskId)?.status ?? null, attempts: st.attempts, error: st.error, completedAt: st.completedAt, generatedBy: st.generatedBy, dependsOn: s.dependsOn, softDependsOn: s.softDependsOn ?? [], staleBecause: st.staleBecause ?? null, priorVersions: st.history?.length ?? 0, recovery: st.recovery ? { final: st.recovery.final, attempts: st.recovery.attempts } : null }; }),
     followUps: d.followUps.map((f) => ({ ...f, missionStatus: missions.find((m) => m.taskId === f.taskId)?.status ?? null })),
   };
 }
@@ -96,13 +96,14 @@ export function buildCandidateView(ctx: CandidateContext) {
 }
 
 /** Full persisted dossier for one business (structured outputs, sources, follow-ups), for the business record view. */
+import { presentVersions } from "./dossier-history";
 import { prototypeSummary } from "./prototype";
 import { buildComparison, buildTrace, learningSummary, strategies } from "./strategy";
 export function readDossier(deps: PipelineDeps, businessId: string) {
   const d = deps.store.dossiers.get(businessId);
   if (!d) return null;
   const tasks = deps.missionQueue.getSnapshot();
-  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, inspection: d.inspection ?? null, strategies: strategies(d), comparison: buildComparison({ canonicalName: deps.store.businesses.get(businessId)?.canonicalName ?? businessId }, d), trace: buildTrace(d, tasks), execution: d.execution ?? { strategies: [], deliverables: [], performance: [] }, learning: learningSummary(d), prototypes: [...deps.store.prototypes.values()].filter((p) => p.businessId === businessId).map((p) => prototypeSummary(p, tasks)), identity: d.identity ?? null, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, evidenceLevel: evidenceLevel({ ...s, pageText } as typeof d.sources[number]), decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, competitorApproval: d.competitorApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
+  return { ...summarizeDossier(d, tasks), businessId, createdAt: d.createdAt, inspection: d.inspection ?? null, planLog: d.planLog ?? [], history: presentVersions(d.history), revisionLog: d.revisionLog ?? [], revisions: d.revisions ?? {}, researchRound: d.researchRound ?? 0, investigations: d.investigations ?? [], handoffs: d.handoffs ?? [], feedback: d.feedback ?? [], completion: d.completion ?? null, pipelineLink: d.pipelineLink ?? null, strategies: strategies(d), comparison: buildComparison({ canonicalName: deps.store.businesses.get(businessId)?.canonicalName ?? businessId }, d), trace: buildTrace(d, tasks), execution: d.execution ?? { strategies: [], deliverables: [], performance: [] }, learning: learningSummary(d), prototypes: [...deps.store.prototypes.values()].filter((p) => p.businessId === businessId).map((p) => prototypeSummary(p, tasks)), identity: d.identity ?? null, sourcesList: d.sources.map(({ pageText, ...s }) => ({ ...s, evidenceLevel: evidenceLevel({ ...s, pageText } as typeof d.sources[number]), decision: s.decision ?? "pending", relevance: s.relevance ?? "possible", pageTextChars: pageText?.length ?? 0 })), images: d.images ?? [], sourceApproval: d.sourceApproval ?? null, competitorApproval: d.competitorApproval ?? null, outputs: Object.fromEntries(STAGES.map((s) => [s.id, d.stages[s.id].output])) };
 }
 
 // ---------------------------------------------------------------- start one business

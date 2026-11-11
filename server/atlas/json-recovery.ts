@@ -124,6 +124,8 @@ const SHAPE: Record<string, { required?: Array<[string, Kind]>; oneOf?: string[]
   competitors: { required: [["shortlist", "array"]], arrays: ["whitespace", "threats", "gaps", "conflicts"] },
   market: { oneOf: ["audience", "trends", "opportunities", "unknowns"], arrays: ["audience", "localContext", "trends", "opportunities", "threats", "barriers", "estimates", "unknowns"] },
   swot: { oneOf: ["strengths", "weaknesses", "opportunities", "threats"], arrays: ["strengths", "weaknesses", "opportunities", "threats"] },
+  insights: { required: [["summary", "string"], ["findings", "array"]], arrays: ["findings", "unknowns"] },
+  pr: { required: [["narrative", "string"]], arrays: ["newsworthy", "stakeholders", "mediaOpportunities", "pressReleaseConcepts", "pitches", "thoughtLeadership", "reputationRisks", "unknowns"] },
   growth: { required: [["recommendations", "array"]] },
   campaign: { required: [["campaigns", "array"]], arrays: ["pillars", "channels", "sequence", "content", "assumptions"] },
   plan: { required: [["actionPlan", "array"]], arrays: ["followUps", "limitations"] },
